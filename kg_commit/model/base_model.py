@@ -1,14 +1,17 @@
 from __future__ import annotations
-from abc import ABC
+from abc import ABC, abstractmethod
 from kg_commit.core.window import Window
 
 
 class BaseModel(ABC):
+    @abstractmethod
     def fit(self, windows: list[Window]):
-        raise NotImplementedError
+        pass
 
+    @abstractmethod
     def update(self, window: Window):
-        raise NotImplementedError
+        pass
 
+    @abstractmethod
     def predict(self, window: Window):
-        raise NotImplementedError
+        pass

@@ -1,0 +1,50 @@
+# JIT Baseline configuration
+
+# Data configuration
+data:
+  path: "data/apachejit/apachejit_train.csv"
+  label_column: "buggy"
+  timestamp_column: "author_date"
+  test_path: "data/apachejit/apachejit_test_small.csv"
+
+# Preprocessing configuration - use only numerical features
+preprocessing:
+  label_column: "buggy"
+  include_text: false
+  feature_columns: ["la", "ld", "nf", "nd", "ns", "ent", "ndev", "age", "nuc", "aexp", "arexp", "asexp"]
+
+# Streaming configuration
+streaming:
+  window_size: 50
+  window_step: 50
+
+# Model configuration
+model:
+  type: "online"
+  classes: [0, 1]
+  classifier_kwargs:
+    max_iter: 1000
+    tol: 1e-3
+
+# Training configuration
+training:
+  type: "incremental"
+
+# Evaluation configuration
+evaluation:
+  metrics: ["accuracy", "precision", "recall", "f1"]
+
+# Output configuration
+output:
+  logs_dir: "outputs/logs"
+  metrics_dir: "outputs/metrics"
+  models_dir: "outputs/models"
+  plots_dir: "outputs/plots"
+  results_dir: "outputs/results"
+  results_file: "outputs/results_jit_baseline.json"
+
+# Experiment configuration
+experiment:
+  name: "jit_baseline"
+  description: "JIT defect prediction using baseline features"
+  random_state: 42

@@ -1,14 +1,18 @@
 from __future__ import annotations
 import numpy as np
-from sklearn.linear_model import SGDClassifier
+from sklearn.base import BaseEstimator
 from kg_commit.core.window import Window
 from .base_model import BaseModel
 
 
 class OnlineModel(BaseModel):
-    def __init__(self, classes: list[int] | None = None):
+    def __init__(self, classes: list[int] | None = None, classifier: BaseEstimator | None = None, **classifier_kwargs):
         self.classes = np.array(classes, dtype=int) if classes is not None else None
-        self.classifier = SGDClassifier(loss="log_loss", max_iter=1000, tol=1e-3)
+        if classifier is None:
+            from sklearn.linear_model import SGDClassifier
+            self.classifier = SGDClassifier(loss="log_loss", max_iter=1000, tol=1e-3, **classifier_kwargs)
+        else:
+            self.classifier = classifier
         self._initialized = False
 
     def fit(self, windows: list[Window]):

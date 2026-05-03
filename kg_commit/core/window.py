@@ -1,3 +1,8 @@
+from __future__ import annotations
+from typing import List, Dict, Any, Optional
+from kg_commit.core.commit import Commit
+
+
 class Window:
     """
     Core abstraction representing a time-bounded batch of commits.
@@ -5,7 +10,7 @@ class Window:
     This is the ONLY object passed across the pipeline.
     """
 
-    def __init__(self, commits, start_time, end_time, metadata=None):
+    def __init__(self, commits: List[Commit], start_time: float, end_time: float, metadata: Optional[Dict[str, Any]] = None):
         self.commits = commits
         self.start_time = start_time
         self.end_time = end_time
@@ -38,23 +43,24 @@ class Window:
             raise ValueError("Window has no features. Run Preprocessor first.")
         return self.X
 
-    def get_labels(self):
-        if self.y is None:
-            raise ValueError("Window has no labels.")
-        return self.y
+    def __len__(self) -> int:
+        return len(self.commits)
+
+    def size(self) -> int:
+        return len(self.commits)
 
     def get_predictions(self):
         if self.predictions is None:
             raise ValueError("No predictions available.")
         return self.predictions
 
-    def size(self):
+    def size(self) -> int:
         return len(self.commits)
 
-    def time_span(self):
+    def time_span(self) -> float:
         return self.end_time - self.start_time
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return (
             f"Window(size={self.size()}, "
             f"time=({self.start_time} → {self.end_time}), "
