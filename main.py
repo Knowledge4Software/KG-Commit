@@ -8,7 +8,7 @@ from kg_commit.evaluation.evaluator import Evaluator
 from kg_commit.evaluation.report import SimpleReport
 from kg_commit.model.online_model import OnlineModel
 from kg_commit.training.incremental_trainer import IncrementalTrainer
-from kg_commit.utils.config import Config
+from kg_commit.utils.config import Config, PROJECT_ROOT
 from kg_commit.persistence.serializer import JSONSerializer
 
 
@@ -52,6 +52,8 @@ def main() -> None:
     window_size = args.window_size or config.get("streaming.window_size")
     window_step = args.window_step or config.get("streaming.window_step")
     output_dir = Path(config.get("output.results_dir", "outputs/results"))
+    if not output_dir.is_absolute():
+        output_dir = PROJECT_ROOT / output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Load dataset

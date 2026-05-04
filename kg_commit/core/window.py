@@ -43,6 +43,11 @@ class Window:
             raise ValueError("Window has no features. Run Preprocessor first.")
         return self.X
 
+    def get_labels(self):
+        if self.y is None:
+            raise ValueError("Window has no labels. Run Preprocessor first.")
+        return self.y
+
     def __len__(self) -> int:
         return len(self.commits)
 

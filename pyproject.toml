@@ -10,7 +10,8 @@ dependencies = [
     "numpy",
     "scikit-learn",
     "matplotlib",
-    "pyyaml"
+    "pyyaml",
+    "python-dotenv"
 ]
 
 [tool.setuptools.packages]

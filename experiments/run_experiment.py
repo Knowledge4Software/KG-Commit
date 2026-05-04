@@ -1,6 +1,6 @@
 from __future__ import annotations
 from pathlib import Path
-from kg_commit.utils.config import Config
+from kg_commit.utils.config import Config, PROJECT_ROOT
 from kg_commit.data.dataset import CSVCommitDataset
 from kg_commit.data.preprocess import SimplePreprocessor
 from kg_commit.data.stream import CommitStream
@@ -74,6 +74,8 @@ class Experiment:
     def save_results(self):
         """Save results to file."""
         output_dir = Path(self.config.get("output.results_dir", "outputs/results"))
+        if not output_dir.is_absolute():
+            output_dir = PROJECT_ROOT / output_dir
         output_dir.mkdir(parents=True, exist_ok=True)
 
         summary = self.evaluator.summarize()
