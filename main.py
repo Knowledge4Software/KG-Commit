@@ -10,6 +10,7 @@ from kg_commit.model.online_model import OnlineModel
 from kg_commit.training.incremental_trainer import IncrementalTrainer
 from kg_commit.utils.config import Config, PROJECT_ROOT
 from kg_commit.persistence.serializer import JSONSerializer
+from kg_commit.knowledge import CommitKnowledgeGraph, KGPreprocessor
 
 
 def parse_args() -> argparse.Namespace:
@@ -36,6 +37,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--window-size", type=int, default=None, help="Number of commits in each window (overrides config).")
     parser.add_argument("--window-step", type=int, default=None, help="Number of commits to advance between windows (overrides config).")
+    parser.add_argument("--use-kg", action="store_true", help="Augment features with knowledge graph (project history features).")
     return parser.parse_args()
 
 
@@ -67,11 +69,18 @@ def main() -> None:
 
     # Create stream, preprocessor, model, and trainer
     stream = CommitStream(commits, window_size=window_size, step=window_step)
-    preprocessor = SimplePreprocessor(label_column=label_column)
+    use_kg = args.use_kg or config.get("knowledge_graph.enabled", False)
+    if use_kg:
+        graph = CommitKnowledgeGraph()
+        preprocessor = KGPreprocessor(graph=graph, label_column=label_column)
+        print("Knowledge graph enabled: augmenting features with project history.")
+    else:
+        graph = None
+        preprocessor = SimplePreprocessor(label_column=label_column)
     model_classes = config.get("model.classes", [0, 1])
     model = OnlineModel(classes=model_classes)
     evaluator = Evaluator()
-    trainer = IncrementalTrainer(model=model, preprocessor=preprocessor, evaluator=evaluator)
+    trainer = IncrementalTrainer(model=model, preprocessor=preprocessor, evaluator=evaluator, graph=graph)
 
     # Run experiment
     print(f"Running experiment with window_size={window_size}, step={window_step}")
@@ -97,7 +106,8 @@ def main() -> None:
         "data_path": str(data_path),
         "window_size": window_size,
         "window_step": window_step,
-        "summary": summary
+        "knowledge_graph": use_kg,
+        "summary": summary,
     }
     serializer = JSONSerializer()
     results_file = output_dir / "results.json"

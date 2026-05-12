@@ -43,6 +43,11 @@ output:
   results_dir: "outputs/results"
   results_file: "outputs/results.json"
 
+# Knowledge graph configuration
+knowledge_graph:
+  enabled: false          # set to true or pass --use-kg to augment features
+  recent_window: 10       # number of recent commits used for recent_bug_rate
+
 # Experiment configuration
 experiment:
   name: "baseline_experiment"
