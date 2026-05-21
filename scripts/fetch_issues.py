@@ -39,7 +39,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 import pandas as pd
 from tqdm import tqdm
-from git import Repo, InvalidGitRepositoryError, BadName
+try:
+    from git import Repo, InvalidGitRepositoryError, BadName
+except ModuleNotFoundError:
+    # GitPython is only needed for Phase 1 (local repos).
+    # Phase 2 (JIRA API) runs without it.
+    Repo = InvalidGitRepositoryError = BadName = None
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)s  %(message)s")
@@ -264,41 +269,54 @@ def main():
                         help="Parallel threads for JIRA API fetches")
     parser.add_argument("--project", default=None,
                         help="Limit to one project, e.g. apache/groovy")
+    parser.add_argument("--phase", choices=["1", "2", "all"], default="all",
+                        help="1 = local git only (server, no network); "
+                             "2 = JIRA API only (local, needs VPN); "
+                             "all = both (default)")
     args = parser.parse_args()
 
     cache_dir = Path(args.cache)
 
-    # Load CSV
-    df = pd.read_csv(args.csv)
-    if args.project:
-        df = df[df.project == args.project]
-        log.info("Filtered to '%s': %d commits", args.project, len(df))
-    else:
-        log.info("Loaded %d commits across %d projects", len(df), df.project.nunique())
+    # ── Phase 1 (server side, no network) ─────────────────────────────────────
+    if args.phase in ("1", "all"):
+        df = pd.read_csv(args.csv)
+        if args.project:
+            df = df[df.project == args.project]
+            log.info("Filtered to '%s': %d commits", args.project, len(df))
+        else:
+            log.info("Loaded %d commits across %d projects",
+                     len(df), df.project.nunique())
 
-    # Phase 1 — local git repos
-    repo_mapping = build_repo_mapping(args.repos)
-    msg_cache    = fetch_commit_messages_locally(
-        df, repo_mapping, cache_dir / "commit_messages.json"
-    )
+        repo_mapping = build_repo_mapping(args.repos)
+        msg_cache    = extract_commit_messages_locally(
+            df, repo_mapping, cache_dir / "commit_messages.json"
+        )
 
-    # Phase 1b — extract issue IDs
-    mapping_rows = extract_issue_ids(df, msg_cache)
-    mapping_df   = pd.DataFrame(mapping_rows)
+        mapping_rows = extract_issue_ids(df, msg_cache)
+        mapping_df   = pd.DataFrame(mapping_rows)
 
-    if mapping_df.empty:
-        log.warning("No JIRA issue IDs found. Check that repos are cloned and accessible.")
-        return
+        if mapping_df.empty:
+            log.warning("No JIRA issue IDs found. Check that repos are cloned.")
+            return
 
+        log.info("Found %d unique JIRA issues across %d commits",
+                 mapping_df.issue_id.nunique(), mapping_df.commit_id.nunique())
+
+        Path(args.map).parent.mkdir(parents=True, exist_ok=True)
+        mapping_df.to_csv(args.map, index=False)
+        log.info("Commit–issue map → %s", args.map)
+
+        if args.phase == "1":
+            log.info("Phase 1 complete. Download '%s' and run --phase 2 locally.",
+                     args.map)
+            return
+
+    # ── Phase 2 (local side, needs VPN) ───────────────────────────────────────
+    # Re-read the map so phase 2 can run standalone from just the CSV.
+    mapping_df    = pd.read_csv(args.map)
     unique_issues = mapping_df.issue_id.unique()
-    log.info("Found %d unique JIRA issues across %d commits",
-             len(unique_issues), mapping_df.commit_id.nunique())
+    log.info("Phase 2: %d unique JIRA issues to fetch", len(unique_issues))
 
-    Path(args.map).parent.mkdir(parents=True, exist_ok=True)
-    mapping_df.to_csv(args.map, index=False)
-    log.info("Commit–issue map → %s", args.map)
-
-    # Phase 2 — JIRA REST API (only unique issues)
     issue_data = fetch_jira_issues(
         unique_issues, cache_dir / "jira_issues.json", workers=args.workers
     )
