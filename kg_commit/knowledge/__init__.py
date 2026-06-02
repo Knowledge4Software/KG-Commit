@@ -1,4 +1,4 @@
 from .dataloader import CommitDataLoader, JITDatasetAdapter
-from .parsers import BaseCommitParser
+from .parsers import BaseCommitParser, IdentityCommitParser, FilteredCommitParser
 
-__all__ = ["CommitDataLoader", "JITDatasetAdapter", "BaseCommitParser"]
+__all__ = ["CommitDataLoader", "JITDatasetAdapter", "BaseCommitParser", "IdentityCommitParser", "FilteredCommitParser"]

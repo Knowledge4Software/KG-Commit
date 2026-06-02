@@ -10,6 +10,16 @@ class BaseCommitParser(ABC):
         """Parses a commit payload and returns the processed entity dictionary."""
         pass
 
+class IdentityCommitParser(BaseCommitParser):
+    """
+    A parser that performs an identity transformation, returning the raw 
+    commit payload completely unfiltered and intact.
+    """
+
+    def parse(self, commit_payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Returns the incoming commit payload exactly as-is."""
+        return commit_payload
+
 
 class FilteredCommitParser(BaseCommitParser):
     """
@@ -33,7 +43,9 @@ class FilteredCommitParser(BaseCommitParser):
             "committed_datetime",
             "files_added_list",
             "files_deleted_list",
-            "files_modified_list"
+            "files_modified_list",
+            "files_renamed_list",
+            "files_copied_list",
         ]
 
     def parse(self, commit_payload: Dict[str, Any]) -> Dict[str, Any]:
