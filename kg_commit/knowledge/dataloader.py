@@ -80,31 +80,30 @@ class CommitDataLoader:
 
     def fetch_commit_data(self, project: str, commit_id: str) -> Optional[Dict[str, Any]]:
         """
-        Fetches an exhaustive profile of commit data, topology, structural metrics,
-        all unique linked issues found in text/trailers, and active branches.
+        Fetches commit data, topology, and structural metrics, filtered 
+        exclusively for Java source code files (.java).
         """
         try:
             repo = self._get_repo(project)
             commit = repo.commit(commit_id)
             
-            # 1. Gather text representations
             commit_text = commit.message
             
-            diff_text = ""
-            if commit.parents:
-                diff_index = commit.parents[0].diff(commit, create_patch=True)
-                diff_text = "\n".join([d.diff.decode('utf-8', errors='ignore') for d in diff_index])
-
-            # 2. Extract modification stats
+            # 1. Extract structural modification stats, filtering only for .java files
             stats = commit.stats
             files_added, files_deleted, files_modified = [], [], []
-            file_extensions = set()
             max_directory_depth = 0
+            java_insertions = 0
+            java_deletions = 0
 
             for filepath, f_stats in stats.files.items():
-                ext = os.path.splitext(filepath)[1].lower()
-                if ext:
-                    file_extensions.add(ext)
+                # Enforce strict Java structural constraint
+                if not filepath.lower().endswith('.java'):
+                    continue
+                
+                # Volumetric track filtering
+                java_insertions += f_stats.get("insertions", 0)
+                java_deletions += f_stats.get("deletions", 0)
                 
                 depth = len(Path(filepath).parts) - 1
                 if depth > max_directory_depth:
@@ -117,19 +116,30 @@ class CommitDataLoader:
                 else:
                     files_modified.append(filepath)
 
-            # 3. Comprehensive Issue Linking Extraction
-            # Merge the main message with metadata trailers (e.g., 'Fixes: #102') if they exist
+            # If a commit modified files but zero .java source blocks, we skip processing
+            total_java_files = len(files_added) + len(files_deleted) + len(files_modified)
+            if total_java_files == 0:
+                return None
+
+            # 2. Extract Diff text ONLY for the .java files to keep streams clean
+            diff_text = ""
+            if commit.parents:
+                diff_index = commit.parents[0].diff(commit, create_patch=True)
+                diff_text = "\n".join([
+                    d.diff.decode('utf-8', errors='ignore') 
+                    for d in diff_index 
+                    if d.a_path.lower().endswith('.java') or (d.b_path and d.b_path.lower().endswith('.java'))
+                ])
+
+            # 3. Issue Linking Context Extraction
             full_text_context = commit_text
             if hasattr(commit, 'trailers') and commit.trailers:
                 full_text_context += "\n" + "\n".join(f"{k}: {v}" for k, v in commit.trailers.items())
                 
-            # Match patterns like GROOVY-3294, #123, or GH-55 using your clean pattern
             issue_pattern = re.compile(r'\b([A-Z]+-\d+|#\d+|GH-\d+)\b')
-            
-            # Find all unique keys, deduplicate via set, and sort them deterministically
             linked_issues = sorted(list(set(issue_pattern.findall(full_text_context))))
 
-            # 4. Tracking the branches containing this commit
+            # 4. Branch Tracking
             try:
                 containing_branches = [
                     b.strip().replace("* ", "") 
@@ -145,15 +155,12 @@ class CommitDataLoader:
                 "message": commit_text,
                 "diff": diff_text,
                 
-                # Refactored Lineage Tuple Length
                 "parents": [p.hexsha for p in commit.parents],
                 "parents_length": len(commit.parents),
                 
-                # Context Extractions (Now returns a clean list of strings or an empty list)
                 "linked_issues": linked_issues,
                 "containing_branches": containing_branches,
                 
-                # Identity & Timestamps
                 "author_name": commit.author.name,
                 "author_email": commit.author.email,
                 "authored_timestamp": commit.authored_date,
@@ -161,16 +168,14 @@ class CommitDataLoader:
                 "committer_name": commit.committer.name,
                 "committed_datetime": commit.committed_datetime.isoformat(),
                 
-                # JIT Volumetric Data
-                "lines_added": stats.total.get("insertions", 0),
-                "lines_deleted": stats.total.get("deletions", 0),
-                "files_changed_count": stats.total.get("files", 0),
+                # Java-Specific JIT Metrics
+                "lines_added": java_insertions,
+                "lines_deleted": java_deletions,
+                "files_changed_count": total_java_files,
                 
-                # Structural Analysis arrays
                 "files_added_list": files_added,
                 "files_deleted_list": files_deleted,
                 "files_modified_list": files_modified,
-                "modified_extensions": list(file_extensions),
                 "max_directory_depth": max_directory_depth,
                 "commit_size_bytes": commit.size
             }

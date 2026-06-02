@@ -1,78 +1,45 @@
-import re
 from abc import ABC, abstractmethod
-from typing import Dict, Any, Pattern, Optional
+from typing import Dict, Any, List, Optional
 
 
 class BaseCommitParser(ABC):
-    """Abstract Base Class for all commit parsers to ensure interface consistency."""
+    """Abstract Base Class defining the standard interface for all commit parsers."""
 
     @abstractmethod
     def parse(self, commit_payload: Dict[str, Any]) -> Dict[str, Any]:
-        """Parses a commit payload and returns extracted entities and metadata."""
-        pass
-
-import re
-from abc import ABC, abstractmethod
-from typing import Dict, Any, Pattern, Optional
-
-
-class BaseCommitParser(ABC):
-    """Abstract Base Class for all commit parsers to ensure interface consistency."""
-
-    @abstractmethod
-    def parse(self, commit_payload: Dict[str, Any]) -> Dict[str, Any]:
-        """Parses a commit payload and returns extracted entities and metadata."""
+        """Parses a commit payload and returns the processed entity dictionary."""
         pass
 
 
-class RegexCommitParser(BaseCommitParser):
+class FilteredCommitParser(BaseCommitParser):
     """
-    An efficient parser that evaluates built-in structural and 
-    linguistic regex rules simultaneously across diff streams in O(n) time.
+    A parser that filters the commit payload dictionary down to a selective schema.
+    Defaults to core metadata and file tracking arrays relevant to the knowledge graph.
     """
 
-    def __init__(self):
-        self.rules: Dict[str, str] = {}
-        self._combined_regex: Optional[Pattern] = None
-        
-        # Load your specific tracking rules automatically
-        self._load_built_in_rules()
-
-    def _load_built_in_rules(self) -> None:
-        """Defines and registers all baseline multi-line pattern rules."""
-        # Kept deliberately empty for now
-        pass
-
-    def _compile_rules(self) -> Pattern:
-        """Combines all registered built-in rules into a single state machine pattern."""
-        if not self.rules:
-            # Fallback if no rules are registered yet (matches nothing safely)
-            return re.compile(r'(?!b)b') 
-            
-        # Join patterns using the alternative operator | and give them named groups
-        combined_pattern = "|".join(f"(?P<{name}>{pattern})" for name, pattern in self.rules.items())
-        return re.compile(combined_pattern, re.MULTILINE)
+    def __init__(self, allowed_keys: Optional[List[str]] = None):
+        """
+        Args:
+            allowed_keys: Optional custom list of keys. If None, uses the standard
+                          JIT defect prediction base schema.
+        """
+        # Fallback to your default production schema if no list is passed
+        self.allowed_keys = allowed_keys if allowed_keys is not None else [
+            "commit_id",
+            "project",
+            "containing_branches",
+            "author_name",
+            "author_email",
+            "committed_datetime",
+            "files_added_list",
+            "files_deleted_list",
+            "files_modified_list"
+        ]
 
     def parse(self, commit_payload: Dict[str, Any]) -> Dict[str, Any]:
-        diff = commit_payload.get("diff", "")
-        
-        # Capture ALL key/value pairs dynamically from the raw commit payload dictionary
-        extracted_entities: Dict[str, Any] = {
-            key: value for key, value in commit_payload.items()
+        """Filters the incoming payload, returning only the configured schema fields."""
+        return {
+            key: commit_payload[key] 
+            for key in self.allowed_keys 
+            if key in commit_payload
         }
-
-        # Lazily compile the simultaneous regex matrix on first call
-        if self._combined_regex is None:
-            self._combined_regex = self._compile_rules()
-
-        # Single-pass execution block: O(n) sequence matching over diff text
-        for match in self._combined_regex.finditer(diff):
-            for group_name, value in match.groupdict().items():
-                if value is not None:
-                    if group_name not in extracted_entities:
-                        extracted_entities[group_name] = []
-                    
-                    if value not in extracted_entities[group_name]:
-                        extracted_entities[group_name].append(value)
-
-        return extracted_entities
