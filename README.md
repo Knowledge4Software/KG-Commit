@@ -1,26 +1,102 @@
-# JIT Defect Prediction Framework
+## Setting Up Neo4j (Windows)
 
-A modular, time-aware framework for Just-in-Time (JIT) software defect prediction at the commit level.
+### Step 1: Install WSL 2
 
-## 🚀 Features
+Open **PowerShell as Administrator** and run:
 
-- Temporal-aware streaming (Window abstraction)
-- Online and batch learning support
-- Plug-and-play feature engineering
-- Strict leakage-free evaluation
-- Experiment reproducibility
+```powershell
+wsl --install
+```
 
-## 🧠 Core Idea
+Restart your computer if prompted.
 
-We model the repository as a stream of **Windows**, where each window represents a time-ordered batch of commits:
+To verify the installation:
 
-Raw Commits → Windows → Features → Model → Evaluation
+```powershell
+wsl --status
+```
+---
 
-## 📁 Project Structure
+### Step 2: Install Docker Desktop
 
-(explain briefly, not full tree)
+1. Download Docker Desktop from Docker's official website.
+2. Run the installer and complete the installation.
+3. During installation, ensure **Use WSL 2 instead of Hyper-V** is enabled.
+4. Launch Docker Desktop after installation.
+5. Wait until Docker reports that the engine is running.
 
-## ⚙️ Installation
+Verify the installation:
 
-```bash
-pip install -e .
+```powershell
+docker --version
+```
+
+---
+
+### Step 3: Start a Local Neo4j Instance
+
+Open PowerShell and run:
+
+```powershell
+docker run ^
+    --name neo4j-local ^
+    -p 7474:7474 -p 7687:7687 ^
+    -d ^
+    -v "%USERPROFILE%\neo4j\data:/data" ^
+    -v "%USERPROFILE%\neo4j\logs:/logs" ^
+    --env NEO4J_AUTH=neo4j/password1234 ^
+    neo4j:latest
+```
+
+You can verify that the container is running:
+
+```powershell
+docker ps
+```
+
+You should see a container named `neo4j-local`.
+
+---
+
+### Step 4: Access Neo4j
+
+Open your browser and navigate to:
+
+```
+http://localhost:7474
+```
+
+Login with:
+
+* **Username:** `neo4j`
+* **Password:** `password1234`
+
+If the login page appears, your Neo4j instance is ready to use.
+
+---
+
+### Common Docker Commands
+
+Stop Neo4j:
+
+```powershell
+docker stop neo4j-local
+```
+
+Start Neo4j again:
+
+```powershell
+docker start neo4j-local
+```
+
+View logs:
+
+```powershell
+docker logs neo4j-local
+```
+
+Remove the container:
+
+```powershell
+docker rm -f neo4j-local
+```
