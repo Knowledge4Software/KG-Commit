@@ -1,6 +1,6 @@
 import logging
 from abc import ABC, abstractmethod
-from typing import Dict, Any, List, Callable, Optional, Iterable
+from typing import Dict, Any, List, Callable, Optional, Iterable, Generator
 from neo4j import GraphDatabase, Transaction
 from .parsers import BaseCommitParser
 
@@ -22,17 +22,17 @@ class EdgeRule:
     def __init__(
         self, 
         source_label: str, 
-        source_key: str, 
+        source_id_key: str,       # FIXED: Reflects standard source node reference semantics
         target_label: str, 
-        target_key: str, 
+        target_items_key: str,    # FIXED: Clarifies where target items sit in payload maps
         relationship_type: str,
         is_array_source: bool = False,
         extractor: Optional[Callable[[Any], Dict[str, Any]]] = None
     ):
         self.source_label = source_label
-        self.source_key = source_key
+        self.source_id_key = source_id_key
         self.target_label = target_label
-        self.target_key = target_key
+        self.target_items_key = target_items_key
         self.relationship_type = relationship_type
         self.is_array_source = is_array_source
         self.extractor = extractor
@@ -69,7 +69,7 @@ class BaseKnowledgeGraph(ABC):
             return session.execute_write(_purge)
 
     # -----------------------------------------------------------------
-    # ADDED: High-Speed Generator Stream Ingestion
+    # High-Performance Batch Ingestion Method
     # -----------------------------------------------------------------
     def ingest_fast(self, commit_stream: Iterable[Dict[str, Any]]) -> int:
         """
@@ -79,15 +79,12 @@ class BaseKnowledgeGraph(ABC):
         """
         successful_ingestions = 0
         
-        # Keep exactly ONE session channel open for the entire streaming lifecycle
         with self.driver.session() as session:
             for parsed_commit in commit_stream:
                 if not parsed_commit:
                     continue
                 
                 try:
-                    # Execute within a managed transaction on the open, reusable session
-                    # Note: The data is ALREADY parsed by fetch_all_commits_fast
                     session.execute_write(self._execute_ingestion_transaction, parsed_commit)
                     successful_ingestions += 1
                 except Exception as e:
@@ -109,7 +106,7 @@ class BaseKnowledgeGraph(ABC):
             return False
 
     # -----------------------------------------------------------------
-    # MODIFIED: Fixed and Batch-Optimized Ingestion Logic
+    # Batch-Optimized Ingestion Logic (Corrected Parameter Alignment)
     # -----------------------------------------------------------------
     def _execute_ingestion_transaction(self, tx: Transaction, data: Dict[str, Any]) -> None:
         # Step A: Dynamically MERGE Entity Nodes
@@ -127,14 +124,14 @@ class BaseKnowledgeGraph(ABC):
             """
             tx.run(query, pk_value=pk_value, props=props)
 
-        # Step B: Dynamically MERGE Vector Edges (Optimized with Cypher UNWIND)
+        # Step B: Dynamically MERGE Vector Edges (Corrected Lookup Logic)
         for rule in self.edge_rules:
-            # Fix: Look up the real node ID using the key specified by target_key
-            src_id_value = data.get(rule.target_key) 
-            if not src_id_value or rule.source_key not in data or data[rule.source_key] is None:
+            # FIX: Pull unique identification value using corrected source key descriptor
+            src_id_value = data.get(rule.source_id_key) 
+            if not src_id_value or rule.target_items_key not in data or data[rule.target_items_key] is None:
                 continue
 
-            raw_items = data[rule.source_key]
+            raw_items = data[rule.target_items_key]
             items_list = raw_items if rule.is_array_source else [raw_items]
             
             processed_targets = []
@@ -169,14 +166,13 @@ class BaseKnowledgeGraph(ABC):
             """
             tx.run(batch_query, src_id=src_id_value, targets=processed_targets)
 
+
 class JITCommitKnowledgeGraph(BaseKnowledgeGraph):
     """
     A concrete implementation of the generalizable graph.
     Configures structural graph topology rules optimized for code change analysis.
     """
 
-    # Advanced Tuple Extractor Rule for processing Renamed file structures
-    # FIXED: source_key updated to match FilteredCommitParser's payload whitelist
     def rename_extractor(self, tuple_data: tuple) -> Dict[str, Any]:
         if not isinstance(tuple_data, tuple) or len(tuple_data) < 2:
             return {}
@@ -185,24 +181,6 @@ class JITCommitKnowledgeGraph(BaseKnowledgeGraph):
             "target_id": new_path,
             "properties": {"renamed_from_historical_path": old_path}
         }
-    
-    # 1. Define the Tuple/Data Extractor for Copied Files
-    def copy_extractor(self, tuple_data: Any) -> Dict[str, Any]:
-        """
-        Unpacks copy telemetry. 
-        Expected format from GitPython/Loader: (old_path, new_path)
-        """
-        if not isinstance(tuple_data, tuple) or len(tuple_data) < 2:
-            return {}
-        old_path, new_path = tuple_data[0], tuple_data[1]
-        return {
-            "target_id": new_path,
-            "properties": {
-                "copied_from_historical_path": old_path,
-                "action": "COPY"
-            }
-        }
-
 
     def _configure_schema(self) -> None:
         # =====================================================================
@@ -226,75 +204,70 @@ class JITCommitKnowledgeGraph(BaseKnowledgeGraph):
             properties_map={"author_name": "name", "author_email": "email"}
         ))
 
-        # Explicitly registered File and Branch descriptors so unique IDs map cleanly
-        self.add_entity_rule(EntityRule(label="File", 
+        self.add_entity_rule(EntityRule(
+            label="File", 
             primary_key="files_modified_list", 
-            properties_map={}))
+            properties_map={}
+        ))
 
-        self.add_entity_rule(EntityRule(label="Branch", 
+        self.add_entity_rule(EntityRule(
+            label="Branch", 
             primary_key="containing_branches", 
-            properties_map={}))
+            properties_map={}
+        ))
 
         # =====================================================================
-        # 2. Define Core Edge Relationship Rules
+        # 2. Define Core Edge Relationship Rules (FIXED PARAMETER NAMES)
         # =====================================================================
         
         # Connection: Commit -> Project 
         self.add_edge_rule(EdgeRule(
-            source_label="Commit", source_key="project",
-            target_label="Project", target_key="commit_id", 
+            source_label="Commit", source_id_key="commit_id",
+            target_label="Project", target_items_key="project", 
             relationship_type="BELONGS_TO"
         ))
 
         # Connection: Commit -> Developer
         self.add_edge_rule(EdgeRule(
-            source_label="Commit", source_key="author_email",
-            target_label="Developer", target_key="commit_id", 
+            source_label="Commit", source_id_key="commit_id",
+            target_label="Developer", target_items_key="author_email", 
             relationship_type="AUTHORED_BY"
         ))
 
         # Connection: Commit -> Branch
         self.add_edge_rule(EdgeRule(
-            source_label="Commit", source_key="containing_branches",
-            target_label="Branch", target_key="commit_id",
+            source_label="Commit", source_id_key="commit_id",
+            target_label="Branch", target_items_key="containing_branches",
             relationship_type="PART_OF_BRANCH", is_array_source=True
         ))
 
         # Connection: Commit -> File (ADDED)
         self.add_edge_rule(EdgeRule(
-            source_label="Commit", source_key="files_added_list",
-            target_label="File", target_key="commit_id", 
+            source_label="Commit", source_id_key="commit_id",
+            target_label="File", target_items_key="files_added_list", 
             relationship_type="ADDED", is_array_source=True
         ))
 
         # Connection: Commit -> File (MODIFIED)
         self.add_edge_rule(EdgeRule(
-            source_label="Commit", source_key="files_modified_list",
-            target_label="File", target_key="commit_id", 
+            source_label="Commit", source_id_key="commit_id",
+            target_label="File", target_items_key="files_modified_list", 
             relationship_type="MODIFIED", is_array_source=True
         ))
 
         # Connection: Commit -> File (DELETED)
         self.add_edge_rule(EdgeRule(
-            source_label="Commit", source_key="files_deleted_list",
-            target_label="File", target_key="commit_id", 
+            source_label="Commit", source_id_key="commit_id",
+            target_label="File", target_items_key="files_deleted_list", 
             relationship_type="DELETED", is_array_source=True
         ))
 
-
+        # Connection: Commit -> File (RENAMED)
         self.add_edge_rule(EdgeRule(
-            source_label="Commit", source_key="files_renamed_list", # <-- FIXED from details to list
-            target_label="File", target_key="commit_id", 
+            source_label="Commit", source_id_key="commit_id", 
+            target_label="File", target_items_key="files_renamed_list", 
             relationship_type="RENAMED_TO",
             is_array_source=True,
             extractor=self.rename_extractor
         ))
-        
-        # 2. Register the Edge Rule linking Commit -> File
-        self.add_edge_rule(EdgeRule(
-            source_label="Commit", source_key="files_copied_list",    # Matches the key in FilteredCommitParser
-            target_label="File", target_key="commit_id", 
-            relationship_type="COPIED_TO",
-            is_array_source=True,
-            extractor=self.copy_extractor
-        ))
+    
