@@ -105,9 +105,9 @@ docker rm -f neo4j-local
 
 The ingestion pipeline is composed of three independent layers:
 
-1. **CommitDataLoader** retrieves raw commit data from repositories.
-2. **CommitParser** transforms or filters commit payloads into a desired schema.
-3. **JITCommitKnowledgeGraph** consumes parsed commits and persists them into Neo4j.
+1. **CommitDataLoader** retrieves and extracts raw commit data from repositories.
+2. **CommitParser** transforms, filters, or extracts information from commit payload.
+3. **JITCommitKnowledgeGraph** defines the schema from the parsed payload.
 
 ### Architecture
 
