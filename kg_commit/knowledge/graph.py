@@ -1,6 +1,6 @@
 import logging
 from abc import ABC, abstractmethod
-from typing import Dict, Any, List, Callable, Optional
+from typing import Dict, Any, List, Callable, Optional, Iterable
 from neo4j import GraphDatabase, Transaction
 from .parsers import BaseCommitParser
 
@@ -69,28 +69,29 @@ class BaseKnowledgeGraph(ABC):
             return session.execute_write(_purge)
 
     # -----------------------------------------------------------------
-    # ADDED: High-Performance Batch Ingestion Method
+    # ADDED: High-Speed Generator Stream Ingestion
     # -----------------------------------------------------------------
-    def ingest_batch(self, raw_payloads: List[Dict[str, Any]]) -> int:
+    def ingest_fast(self, commit_stream: Iterable[Dict[str, Any]]) -> int:
         """
-        Ingests a large collection of raw commits inside a single, high-performance
-        reused database session block to completely eliminate connection handshake overhead.
+        Consumes a high-speed parsed commit stream on-the-fly, running 
+        ingestions inside a single, reused session to eliminate connection
+        handshake overhead while maintaining a flat memory profile.
         """
         successful_ingestions = 0
         
-        # Open exactly ONE session channel for the entire collection workload
+        # Keep exactly ONE session channel open for the entire streaming lifecycle
         with self.driver.session() as session:
-            for raw_payload in raw_payloads:
-                parsed_data = self.parser.parse(raw_payload)
-                if not parsed_data:
+            for parsed_commit in commit_stream:
+                if not parsed_commit:
                     continue
                 
                 try:
                     # Execute within a managed transaction on the open, reusable session
-                    session.execute_write(self._execute_ingestion_transaction, parsed_data)
+                    # Note: The data is ALREADY parsed by fetch_all_commits_fast
+                    session.execute_write(self._execute_ingestion_transaction, parsed_commit)
                     successful_ingestions += 1
                 except Exception as e:
-                    logger.error(f"Failed to ingest individual commit in batch stream: {e}")
+                    logger.error(f"Failed to ingest individual commit in fast stream: {e}")
                     
         return successful_ingestions
 
