@@ -154,7 +154,7 @@ kg = JITCommitKnowledgeGraph(
 
 ### Parser Layer
 
-Parsers define how raw commit payloads are transformed before entering the graph.
+Parsers define how raw commit payloads are transformed or additional entity/relations are extracted before entering the graph.
 
 #### IdentityCommitParser
 
@@ -180,8 +180,6 @@ parser = FilteredCommitParser(
 )
 ```
 
-If no schema is provided, the parser uses the framework's default knowledge graph schema.
-
 ### Ingesting Commits
 
 The data loader produces a generator of raw commits. This stream can be passed directly into the knowledge graph ingestion engine.
@@ -193,13 +191,7 @@ raw_stream = data_loader.fetch_all_commits_fast(
     limit=-1
 )
 
-# B. Optionally wrap the stream with tracking or telemetry
-tracked_stream = make_tracked_stream(
-    raw_stream,
-    project_label=project_short_name
-)
-
-# C. Ingest into Neo4j
+# B. Ingest into Neo4j
 actual_ingested = kg.ingest_fast(tracked_stream)
 
 print(f"Ingested {actual_ingested:,} commits")
@@ -209,7 +201,7 @@ During ingestion:
 
 1. The `CommitDataLoader` yields raw commit dictionaries.
 2. The configured parser processes each commit.
-3. `JITCommitKnowledgeGraph` converts parsed entities into graph nodes and relationships.
+3. `JITCommitKnowledgeGraph` converts parsed entities into graph nodes and relationships (schema).
 4. The resulting structure is persisted to Neo4j using a reusable session engine.
 
 ### Example Notebook
