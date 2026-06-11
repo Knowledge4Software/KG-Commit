@@ -5,7 +5,9 @@ from typing import Dict, Any, Generator, List, Optional
 from git import Repo, Commit
 from pathlib import Path
 import re
-
+import datetime
+import subprocess
+        
 class BaseDatasetAdapter(ABC):
     """
     Abstract Base Class for converting specific dataset files (CSV, JSON, etc.)
@@ -76,10 +78,10 @@ class CommitDataLoader:
     
     def fetch_all_commits_fast(self, project: str, limit: int = -1) -> Generator[Dict[str, Any], None, None]:
         """
-        High-speed chronological commit streaming. Explodes and categorizes file 
-        changes by explicit Git status types (A, D, R, C, M) using numstat + summary logs.
+        High-speed chronological commit streaming with complete inline code diff collection. 
+        Processes the Git stream entirely in byte space to guarantee immunity to encoding failures.
         """
-        import datetime
+        
         repo = self._get_repo(project)
         
         # 1. Map branch alignments up front using local branch tracking heads only
@@ -91,17 +93,23 @@ class CommitDataLoader:
             except Exception:
                 continue
 
-        # 2. Extract logs with 7-token metadata header format AND summary stats
-        delimiter = "||--NEXT_COMMIT--||"
-        log_format = f"{delimiter}%H|%aN|%aE|%cN|%at|%ct|%B"
+        # 1. Update your formatting string to include %P right after %H
+        delimiter = b"||--NEXT_COMMIT--||"
+        log_format = "||--NEXT_COMMIT--||%H|%P|%aN|%aE|%cN|%at|%ct|%B"
         
-        # Adding --summary gives us explicit 'create mode', 'delete mode', 'rename', and 'copy' lines
-        args = ["--reverse", f"--format={log_format}", "--numstat", "--summary"]
+        # Keep your command array exactly the same
+        cmd = ["git", "-C", repo.working_dir, "log", "--reverse", f"--format={log_format}", "--numstat", "--summary", "-p"]
         if limit > 0:
-            args.append(f"-n {limit}")
+            cmd.extend(["-n", str(limit)])
             
-        raw_log_stream = repo.git.log(*args)
-        raw_commits = raw_log_stream.split(delimiter)
+        # NATIVE BYTES FIX: Directly stream stdout into bytes, completely bypassing encoding layers
+        process = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        
+        if process.returncode != 0:
+            raise RuntimeError(f"Git command failed: {process.stderr.decode('utf-8', errors='replace')}")
+            
+        raw_log_stream_bytes = process.stdout
+        raw_commits = raw_log_stream_bytes.split(delimiter)
 
         issue_pattern = re.compile(r'\b([A-Z]+-\d+|#\d+|GH-\d+)\b')
 
@@ -109,34 +117,58 @@ class CommitDataLoader:
             if not raw_block.strip():
                 continue
                 
-            lines = raw_block.strip().split("\n")
-            header = lines[0].split("|")
+            lines = raw_block.strip().split(b"\n")
+            header = lines[0].split(b"|")
             
-            if len(header) < 7:
+            # Since we added %P, we now expect at least 8 elements in the header
+            if len(header) < 8:
                 continue
                 
-            commit_id = header[0]
-            author_name = header[1]
-            author_email = header[2]
-            committer_name = header[3]
-            authored_ts = int(header[4])
-            committed_ts = int(header[5])
+            commit_id = header[0].decode('utf-8', errors='replace')
             
+            # UNPACK PARENTS: Extract space-separated parent hashes into a clean list of strings
+            raw_parents = header[1].decode('utf-8', errors='replace').strip()
+            parents_list = raw_parents.split(" ") if raw_parents else []
+            
+            # Shift your remaining indexes down by 1
+            author_name = header[2].decode('utf-8', errors='replace')
+            author_email = header[3].decode('utf-8', errors='replace')
+            committer_name = header[4].decode('utf-8', errors='replace')
+            
+            try:
+                authored_ts = int(header[5])
+                committed_ts = int(header[6])
+            except ValueError:
+                continue
+
             authored_dt = datetime.datetime.fromtimestamp(authored_ts, datetime.timezone.utc).isoformat()
             committed_dt = datetime.datetime.fromtimestamp(committed_ts, datetime.timezone.utc).isoformat()
 
-            # Separate message body paragraphs from the log data blocks
-            message_lines = [header[6]]
+            # FIX: Message body comes strictly and exclusively from the %B token inside the header array
+            message_body = header[7].decode('utf-8', errors='replace').strip()
+            
             data_lines = []
+            diff_lines = []
+            
+            # State tracker to separate file alterations metadata from raw patches/context lines
+            in_diff = False
             
             for line in lines[1:]:
-                # Data lines are either tab-delimited numstats or space-delimited summaries
-                if "\t" in line or line.strip().startswith(('create mode', 'delete mode', 'rename', 'copy')):
-                    data_lines.append(line.strip())
+                # Once we cross into the diff block, everything trailing belongs to the patch
+                if in_diff:
+                    diff_lines.append(line)
+                # Detect the line boundary indicating a patch block has begun
+                elif line.startswith(b'diff --git'):
+                    in_diff = True
+                    diff_lines.append(line)
+                # Everything else before the patch is strictly numstat or summary lines
                 else:
-                    message_lines.append(line)
+                    # Ignore empty spacing or lone trailing newline noise padding
+                    if line.strip():
+                        data_lines.append(line.strip())
                     
-            message_body = "\n".join(message_lines).strip()
+            # Safely transform the patch byte array back into a real string 
+            actual_diff_patch = b"\n".join(diff_lines).decode('utf-8', errors='replace').strip()
 
             # Tracking structures for files and line deltas
             files_added, files_deleted, files_modified = [], [], []
@@ -147,43 +179,40 @@ class CommitDataLoader:
             max_directory_depth = 0
             
             # Sub-pass 1: Parse all raw file paths and line tallies from numstats
-            numstat_map = {} # Maps target path -> (added, deleted)
-            for line in data_lines:
-                if "\t" in line:
-                    parts = line.split("\t")
+            numstat_map = {} 
+            for line_bytes in data_lines:
+                if b"\t" in line_bytes:
+                    parts = line_bytes.split(b"\t")
                     if len(parts) < 3:
                         continue
-                    numstat_map[parts[2]] = (parts[0], parts[1])
+                    # Safely store path references as text
+                    path_str = parts[2].decode('utf-8', errors='replace')
+                    numstat_map[path_str] = (parts[0].decode('utf-8'), parts[1].decode('utf-8'))
+
+            # Convert our binary data lines into safely isolated string sequences for parsing
+            data_strings = [line.decode('utf-8', errors='replace') for line in data_lines]
 
             # Sub-pass 2: Determine explicit Change Types using the summary strings
-            # We track processed files to know who is left over as a Modification ('M')
             processed_raw_paths = set()
 
-            for line in data_lines:
-                # Catch explicit Create ('A') Action
+            for line in data_strings:
                 if line.startswith('create mode'):
-                    # format: "create mode 100644 path/to/file.java"
                     filepath = line.split(' ', 3)[-1]
                     if filepath.lower().endswith('.java') and filepath in numstat_map:
                         files_added.append(filepath)
                         processed_raw_paths.add(filepath)
 
-                # Catch explicit Delete ('D') Action
                 elif line.startswith('delete mode'):
-                    # format: "delete mode 100644 path/to/file.java"
                     filepath = line.split(' ', 3)[-1]
                     if filepath.lower().endswith('.java') and filepath in numstat_map:
                         files_deleted.append(filepath)
                         processed_raw_paths.add(filepath)
 
-                # Catch explicit Rename ('R') Action
                 elif line.startswith('rename '):
-                    # format: "rename old_path => new_path (90%)"
                     raw_path_block = line.split(' ', 1)[1].rsplit(' (', 1)[0]
                     if raw_path_block in numstat_map:
                         processed_raw_paths.add(raw_path_block)
                         
-                        # Unpack git's brace notation if renaming inside the same tree package
                         if " => " in raw_path_block:
                             match = re.search(r'\{(.*?) => (.*?)\}', raw_path_block)
                             if match:
@@ -197,9 +226,7 @@ class CommitDataLoader:
                             if new_path.lower().endswith('.java'):
                                 files_renamed_list.append((old_path, new_path))
 
-                # Catch explicit Copy ('C') Action
                 elif line.startswith('copy '):
-                    # format: "copy old_path => new_path (90%)"
                     raw_path_block = line.split(' ', 1)[1].rsplit(' (', 1)[0]
                     if raw_path_block in numstat_map:
                         processed_raw_paths.add(raw_path_block)
@@ -210,12 +237,11 @@ class CommitDataLoader:
                             if new_path.lower().endswith('.java'):
                                 files_copied_list.append(new_path)
 
-            # Sub-pass 3: Everything left inside our numstat map is a pure Modification ('M')
+            # Sub-pass 3: Modifications ('M')
             for raw_filepath, (added_str, deleted_str) in numstat_map.items():
                 if raw_filepath in processed_raw_paths:
-                    continue # Already categorized by summary rules above
+                    continue 
                 
-                # Check extension on the raw_filepath (or unpack if it's an inline modification/rename Git compressed)
                 clean_path = raw_filepath
                 if " => " in raw_filepath:
                     match = re.search(r'\{(.*?) => (.*?)\}', raw_filepath)
@@ -224,21 +250,17 @@ class CommitDataLoader:
                 if not clean_path.lower().endswith('.java'):
                     continue
 
-                # Add up lines metrics
                 add_val = int(added_str) if added_str.isdigit() else 0
                 del_val = int(deleted_str) if deleted_str.isdigit() else 0
                 java_insertions += add_val
                 java_deletions += del_val
 
-                # Track tree depth metrics
                 depth = len(Path(clean_path).parts) - 1
                 if depth > max_directory_depth:
                     max_directory_depth = depth
 
-                # If it wasn't explicitly tagged as A, D, R, or C by the summary, it is a Modification ('M')
                 files_modified.append(clean_path)
 
-            # Sum total java files touched in this block
             total_java_files = (len(files_added) + len(files_deleted) + len(files_modified) + 
                                 len(files_renamed_list) + len(files_copied_list))
             
@@ -252,9 +274,9 @@ class CommitDataLoader:
                 "commit_id": commit_id,
                 "project": project,
                 "message": message_body,
-                "diff": "", 
+                "diff": actual_diff_patch,
                 
-                "parents": [], 
+                "parents": parents_list, 
                 "parents_length": 0,
                 
                 "linked_issues": linked_issues,
@@ -278,7 +300,7 @@ class CommitDataLoader:
                 "files_copied_list": files_copied_list,
                 
                 "max_directory_depth": max_directory_depth,
-                "commit_size_bytes": 0
+                "commit_size_bytes": len(actual_diff_patch.encode('utf-8'))
             }
     
     def fetch_commit_data(self, project: str, commit_id: str) -> Optional[Dict[str, Any]]:

@@ -166,7 +166,6 @@ class BaseKnowledgeGraph(ABC):
             """
             tx.run(batch_query, src_id=src_id_value, targets=processed_targets)
 
-
 class JITCommitKnowledgeGraph(BaseKnowledgeGraph):
     """
     A concrete implementation of the generalizable graph.
@@ -184,12 +183,16 @@ class JITCommitKnowledgeGraph(BaseKnowledgeGraph):
 
     def _configure_schema(self) -> None:
         # =====================================================================
-        # 1. Define Entity Node Mapping Rules
+        # 1. Define Entity Node Mapping Rules (Only for root-level singletons)
         # =====================================================================
         self.add_entity_rule(EntityRule(
             label="Commit",
             primary_key="commit_id",
-            properties_map={"committed_datetime": "committed_at", "message": "message"}
+            properties_map={
+                "committed_datetime": "committed_at", 
+                "message": "message",
+                # "diff": "diff"
+            }
         ))
         
         self.add_entity_rule(EntityRule(
@@ -204,20 +207,8 @@ class JITCommitKnowledgeGraph(BaseKnowledgeGraph):
             properties_map={"author_name": "name", "author_email": "email"}
         ))
 
-        self.add_entity_rule(EntityRule(
-            label="File", 
-            primary_key="files_modified_list", 
-            properties_map={}
-        ))
-
-        self.add_entity_rule(EntityRule(
-            label="Branch", 
-            primary_key="containing_branches", 
-            properties_map={}
-        ))
-
         # =====================================================================
-        # 2. Define Core Edge Relationship Rules (FIXED PARAMETER NAMES)
+        # 2. Define Core Edge Relationship Rules
         # =====================================================================
         
         # Connection: Commit -> Project 
@@ -238,7 +229,14 @@ class JITCommitKnowledgeGraph(BaseKnowledgeGraph):
         self.add_edge_rule(EdgeRule(
             source_label="Commit", source_id_key="commit_id",
             target_label="Branch", target_items_key="containing_branches",
-            relationship_type="PART_OF_BRANCH", is_array_source=True
+            relationship_type="INSIDE_BRANCH", is_array_source=True
+        ))
+
+        # Connection: Commit -> Issue Tracker Link
+        self.add_edge_rule(EdgeRule(
+            source_label="Commit", source_id_key="commit_id",
+            target_label="Issue", target_items_key="linked_issues",
+            relationship_type="FIXES_ISSUE", is_array_source=True
         ))
 
         # Connection: Commit -> File (ADDED)
@@ -262,12 +260,43 @@ class JITCommitKnowledgeGraph(BaseKnowledgeGraph):
             relationship_type="DELETED", is_array_source=True
         ))
 
-        # Connection: Commit -> File (RENAMED)
+        # Connection: Commit -> File (COPIED)
+        self.add_edge_rule(EdgeRule(
+            source_label="Commit", source_id_key="commit_id",
+            target_label="File", target_items_key="files_copied_list",
+            relationship_type="COPIED_TO", is_array_source=True
+        ))
+
+        # =====================================================================
+        # 3. Handle Bidirectional Rename Tracing
+        # =====================================================================
+        # FIX: The extractors now return dictionaries matching Step B's expected 
+        # format: {"target_id": value, "properties": {}}
+        
+        # Link what the old file path was BEFORE this commit dropped
+        self.add_edge_rule(EdgeRule(
+            source_label="Commit", source_id_key="commit_id", 
+            target_label="File", target_items_key="files_renamed_list", 
+            relationship_type="RENAMED_FROM",
+            is_array_source=True,
+            extractor=lambda item: {"target_id": item[0], "properties": {}} if isinstance(item, tuple) else {}
+        ))
+
+        # Link what the new file path became AFTER this commit dropped
         self.add_edge_rule(EdgeRule(
             source_label="Commit", source_id_key="commit_id", 
             target_label="File", target_items_key="files_renamed_list", 
             relationship_type="RENAMED_TO",
             is_array_source=True,
-            extractor=self.rename_extractor
+            extractor=lambda item: {"target_id": item[1], "properties": {}} if isinstance(item, tuple) else {}
         ))
-    
+
+        # Connection: Parent Commit -> Child Commit (Self-Referential Lineage)
+        self.add_edge_rule(EdgeRule(
+            source_label="Commit", 
+            source_id_key="commit_id",
+            target_label="Commit", 
+            target_items_key="parents",
+            relationship_type="PARENT_OF", 
+            is_array_source=True
+        ))
