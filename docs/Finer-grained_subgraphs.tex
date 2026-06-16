@@ -1,0 +1,1677 @@
+\documentclass[12pt,a4paper]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage{geometry}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{listings}
+\usepackage{parskip}
+\usepackage{microtype}
+\usepackage{multirow}
+\usepackage{mdframed}
+
+\geometry{margin=2.5cm}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue!70!black,
+    citecolor=green!50!black,
+    urlcolor=blue!70!black,
+}
+
+\lstset{
+    basicstyle=\ttfamily\small,
+    frame=single,
+    breaklines=true,
+    columns=fullflexible,
+}
+
+% Coloured boxes for the five analysis dimensions
+\newmdenv[backgroundcolor=blue!5,linecolor=blue!40,linewidth=0.8pt,
+          innerleftmargin=6pt,innerrightmargin=6pt,innertopmargin=4pt,
+          innerbottommargin=4pt]{effbox}
+\newmdenv[backgroundcolor=orange!8,linecolor=orange!50,linewidth=0.8pt,
+          innerleftmargin=6pt,innerrightmargin=6pt,innertopmargin=4pt,
+          innerbottommargin=4pt]{diffbox}
+\newmdenv[backgroundcolor=green!6,linecolor=green!40,linewidth=0.8pt,
+          innerleftmargin=6pt,innerrightmargin=6pt,innertopmargin=4pt,
+          innerbottommargin=4pt]{implbox}
+\newmdenv[backgroundcolor=teal!5,linecolor=teal!40,linewidth=0.8pt,
+          innerleftmargin=6pt,innerrightmargin=6pt,innertopmargin=4pt,
+          innerbottommargin=4pt]{prosbox}
+\newmdenv[backgroundcolor=red!5,linecolor=red!30,linewidth=0.8pt,
+          innerleftmargin=6pt,innerrightmargin=6pt,innertopmargin=4pt,
+          innerbottommargin=4pt]{consbox}
+
+\title{\textbf{Finer-Grained Subgraphs for KG-Commit}\\
+\large A Complete Survey of All Code Representation Options\\
+with Efficiency, Delta Modeling, Implementation, Pros and Cons}
+\author{KG-Commit Research Project}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\noindent\textbf{Legend for shaded analysis boxes:}
+\begin{itemize}[noitemsep,leftmargin=1.5em]
+  \item \colorbox{blue!5}{\textbf{Efficiency}} --- storage, maintenance, and query cost in the KG
+  \item \colorbox{orange!8}{\textbf{Difference Modeling}} --- how commit-level deltas are extracted and stored
+  \item \colorbox{green!6}{\textbf{Prior Implementations}} --- readiness and difficulty of adoption
+  \item \colorbox{teal!5}{\textbf{Pros}} --- advantages specific to KG-Commit
+  \item \colorbox{red!5}{\textbf{Cons}} --- disadvantages and risks specific to KG-Commit
+\end{itemize}
+
+\tableofcontents
+\newpage
+
+%%=============================================================================
+\section{Introduction}
+%%=============================================================================
+
+KG-Commit models repository evolution as an incremental knowledge graph updated
+with every arriving commit. The current graph captures a structural/declarative
+layer (COMMIT, FILE, CLASS, FUNCTION, VARIABLE, AUTHOR, TIME, INTERVAL, BRANCH,
+ISSUE). This document surveys every known finer-grained representation that can
+be added as a subgraph below the FUNCTION node, covering sixteen families in
+full detail.
+
+For each family, in addition to what it captures and how it is encoded as a
+graph, this version adds five analysis dimensions critical for the
+KG-Commit setting:
+
+\begin{enumerate}[noitemsep]
+  \item \textbf{Efficiency} --- space, maintenance, and query cost
+  \item \textbf{Difference Modeling} --- how commit-level deltas are
+        extracted and added incrementally
+  \item \textbf{Prior Implementations and Difficulty} --- tool readiness
+        and implementation effort
+  \item \textbf{Pros} specific to KG-Commit
+  \item \textbf{Cons} specific to KG-Commit
+\end{enumerate}
+
+\subsection{The Granularity Ladder}
+
+\begin{lstlisting}
+FUNCTION
+  BASIC_BLOCK / STATEMENT_BLOCK
+    STATEMENT  (assign, if, loop, return, throw, call, try/catch)
+      EXPRESSION  (binary, unary, cast, instanceof)
+        OPERATION  (+, ==, &&, [], new, .field)
+          OPERAND  (variable use, field read, array element)
+            LITERAL / CONSTANT  (0, "str", null, true)
+\end{lstlisting}
+
+\subsection{Key Principle}
+
+Defect signal lives in \emph{edges}, not nodes. Evaluate every representation
+primarily on which new \textbf{edge types} it contributes.
+
+\subsection{General Design Axes}
+
+\begin{longtable}{p{3.2cm}p{5cm}p{4.5cm}}
+\toprule
+\textbf{Axis} & \textbf{Question} & \textbf{Why it matters} \\
+\midrule
+\endhead
+What is captured & Syntax, control, data, memory, behaviour? & Which bug classes are expressible \\
+Static vs.\ dynamic & Source/IR analysis vs.\ runtime traces & Dynamic needs re-execution per commit \\
+Symbolic vs.\ learned & Interpretable subgraph vs.\ dense vector & Both wanted simultaneously \\
+Snapshot vs.\ change & Whole-function state vs.\ diff/delta & JIT signal is in the \emph{change} \\
+Intra- vs.\ inter-proc. & Inside one method vs.\ across calls & Many defects cross boundaries \\
+Language scope & Java-specific vs.\ language-agnostic & Corpus is Apache Java \\
+Cost / explosion & Build time and graph size per commit & Full repo histories risk explosion \\
+\bottomrule
+\end{longtable}
+
+%%=============================================================================
+\section{Family 1: Token and Lexical Representations}
+%%=============================================================================
+
+\subsection{What It Captures}
+
+A lexer splits source into typed tokens: keywords, identifiers, literals,
+operators, separators. A function becomes a flat sequence
+$\langle t_1, t_2, \ldots, t_n \rangle$. Variants include raw token sequences,
+type-only (values stripped), filtered/canonical (identifiers renamed to
+\texttt{v1,v2,\ldots}), $n$-grams, BPE/subword tokenisation (CodeBERT-style),
+and grammar-aligned tokenisation.
+
+\paragraph{Graph encoding.}
+\begin{lstlisting}
+Statement --TOKEN_SEQ[pos=i]--> Token(type, value)
+Token(i)  --NEXT_TOKEN-->       Token(i+1)
+\end{lstlisting}
+
+\begin{effbox}
+\textbf{Efficiency.}
+Linear in function size: $O(n)$ nodes and $O(n)$ edges for $n$ tokens.
+No complex structures. A 100-line function produces roughly 300--600 token
+nodes. Storage per commit is tiny (only changed functions' tokens). Query cost
+for simple pattern matching is $O(n)$ traversal. The most space-efficient
+structural representation possible.
+\end{effbox}
+
+\begin{diffbox}
+\textbf{Difference Modeling.}
+Excellent fit. The git diff already gives added/removed lines; tokenising each
+changed line is trivial. Delta = set of added and removed token nodes with their
+\texttt{NEXT\_TOKEN} edges reconnected. No ambiguity: token positions are linear.
+Space for delta: proportional to changed tokens only. Time to extract: $O(k)$
+where $k$ = changed tokens. Fully deterministic — no mapping problem.
+\end{diffbox}
+
+\begin{implbox}
+\textbf{Prior Implementations and Difficulty.}
+Fully production-ready. tree-sitter, JavaParser, ANTLR all produce token
+streams. Token-level diffs are trivially computable. DeepJIT (MSR 2019) and
+CC2Vec (ICSE 2020) use token sequences as their primary input. Integrating into
+KG-Commit requires one afternoon of engineering. Difficulty: \textbf{very easy}.
+\end{implbox}
+
+\begin{prosbox}
+\textbf{Pros.}
+Cheapest representation possible. Works for all JVM languages in the Apache
+corpus (Java, Kotlin, Groovy, Scala). Perfect as a warm-start baseline before
+adding semantic layers. Token embeddings (BPE) are the input to all pretrained
+code models, so this layer is reused by Family~14.
+\end{prosbox}
+
+\begin{consbox}
+\textbf{Cons.}
+Zero semantic content. Two programs with the same token bag can behave
+completely differently. Cannot detect data-flow, alias, or control-flow bugs.
+Sensitive to formatting changes (a whitespace refactor changes many tokens).
+BPE tokenisation misaligns with grammatical boundaries (TokDrift 2024), reducing
+the reliability of downstream model reasoning.
+\end{consbox}
+
+%%=============================================================================
+\section{Family 2: Syntactic Representations (AST)}
+%%=============================================================================
+
+\subsection{What It Captures}
+
+The Abstract Syntax Tree maps source code to a hierarchical tree of language
+constructs (\texttt{IfStmt}, \texttt{ForStmt}, \texttt{MethodCallExpr},
+\texttt{BinaryExpr}, \texttt{VarDeclarator}) with leaves as identifiers and
+literals. Variants: CST (includes punctuation), normalised AST (identifiers
+renamed), AST paths (code2vec/code2seq leaf-to-leaf paths), type-resolved AST.
+
+\paragraph{Graph encoding.}
+\begin{lstlisting}
+Function   --AST_ENTRY-->        RootNode
+RootNode   --AST_CHILD[pos=i]--> ChildNode
+ChildNode  --AST_CHILD[pos=j]--> LeafNode
+LeafNode   --HAS_TYPE-->         TypeNode
+\end{lstlisting}
+
+\begin{effbox}
+\textbf{Efficiency.}
+$O(n)$ nodes for $n$ source tokens, typically 2--5$\times$ more nodes than
+tokens. A 100-line function produces 500--2000 AST nodes. Tree traversal is
+$O(n)$. Incremental parsing via tree-sitter reduces re-parse cost on small edits
+to $O(k \log n)$ for $k$ changed characters. Memory footprint is moderate: one
+pointer per parent--child pair. Total AST storage for a full Apache project
+history is in the tens of millions of nodes --- manageable with node compression
+(store type+value only, no source text duplication).
+\end{effbox}
+
+\begin{diffbox}
+\textbf{Difference Modeling.}
+GumTree (ASE 2014, redesigned ICSE 2024) computes the AST edit script between
+before/after versions in $O(n^2)$ worst case but $O(n \log n)$ in practice for
+the 2024 redesign. The edit script is a compact list of
+\texttt{insert/delete/update/move} operations at AST-node granularity.
+Delta space: proportional to the number of changed AST nodes (typically
+$O(k)$ for $k$ changed lines). Main challenge: GumTree edit scripts are
+\emph{not unique} --- different algorithms produce different scripts for the
+same semantic change, introducing ambiguity in graph updates. The 2024 redesign
+reduces this significantly.
+\end{diffbox}
+
+\begin{implbox}
+\textbf{Prior Implementations and Difficulty.}
+Fully production-ready. GumTree is a Java library with CLI. JavaParser and
+Spoon produce ASTs directly. tree-sitter provides incremental, multi-language
+ASTs. GumTree integration with Java source is one-command. The Spoon library
+also provides type-resolved ASTs with no extra effort. Difficulty: \textbf{easy}.
+\end{implbox}
+
+\begin{prosbox}
+\textbf{Pros.}
+Language-aware structural change detection far superior to line-based diff.
+Foundation for all higher-level representations --- every other family builds
+on the AST. Type-resolved AST (Spoon) directly connects to your existing
+\texttt{DATA\_TYPE} and \texttt{FUNCTION\_SIGNATURE} nodes. AST paths
+(code2vec) are a cheap way to get function embeddings without a full LLM.
+\end{prosbox}
+
+\begin{consbox}
+\textbf{Cons.}
+No execution semantics. Two ASTs can be structurally similar but behaviourally
+opposite (e.g., \texttt{>} vs.\ \texttt{>=}). Edit-script ambiguity makes
+deterministic graph updates non-trivial. Normalised ASTs lose identifier names,
+which are often semantically critical (\texttt{isNull()} vs.\
+\texttt{isValid()}).
+\end{consbox}
+
+\paragraph{Java tooling.} tree-sitter, JavaParser, Spoon, Eclipse JDT, GumTree.
+
+%%=============================================================================
+\section{Family 3: Control-Flow Representations}
+%%=============================================================================
+
+\subsection{What It Captures}
+
+The Control Flow Graph (CFG) has nodes = basic blocks or statements, edges
+labelled \texttt{TRUE/FALSE/UNCONDITIONAL}. The Control Dependence Graph (CDG)
+captures ``whether B executes depends on A.'' The Call Graph (CG) connects
+callers to callees. The Exception Flow Graph models throw/catch/finally chains.
+Concurrency graphs (lock graphs, happens-before, race graphs) model threading.
+
+\paragraph{Graph encoding.}
+\begin{lstlisting}
+Block     --CFG_TRUE/FALSE/NEXT--> Block
+Statement --CDG_CONTROLS-->        Statement
+Method    --CALLS[site=s]-->       Method
+Method    --THROWS-->              ExceptionType
+Block     --ACQUIRES_LOCK-->       LockNode
+\end{lstlisting}
+
+\begin{effbox}
+\textbf{Efficiency.}
+CFG: $O(n)$ nodes and $O(n)$ edges for $n$ statements (branching factor
+typically 1--3). Basic-block CFG is $3$--$10\times$ more compact than
+per-statement. Call graph: $O(M)$ nodes and $O(C)$ edges for $M$ methods and
+$C$ call sites --- very compact ($10^4$--$10^5$ edges for a medium project).
+Lock graphs are sparse and tiny (few dozen nodes per application). CDG adds
+$O(n)$ extra edges to an existing CFG. Total: moderate overhead above AST,
+manageable with basic-block granularity.
+\end{effbox}
+
+\begin{diffbox}
+\textbf{Difference Modeling.}
+Moderate difficulty. CFGs lack a natural diff operation --- when a function
+changes, its CFG must be recomputed from scratch for that function. Practical
+approach: apply the GumTree AST edit script to identify which basic blocks
+were affected, then rebuild only those blocks. Call graph: update edges for
+new/removed/changed call sites only (incremental, cheap). Exception flow: update
+when \texttt{throws}/\texttt{catch} clauses change. Lock graph: update when
+\texttt{synchronized} blocks change. Main ambiguity: block identity across
+versions (a renamed block is the same or a new node?).
+\end{diffbox}
+
+\begin{implbox}
+\textbf{Prior Implementations and Difficulty.}
+CFG construction: production-ready in Soot and Spoon. Call graph: Soot
+(CHA/RTA/SPARK) and WALA are production tools. CFG \emph{differencing}
+(incremental CFG update) is much less mature --- a custom implementation is
+required. Exception flow graph: research tools (Robusta, 2008) but not
+production-ready for incremental use. Concurrency graphs: RacerD (Meta) is
+production-ready but not designed for KG integration. Difficulty: CFG
+construction \textbf{easy}; incremental CFG diff \textbf{moderate};
+concurrency graphs \textbf{hard}.
+\end{implbox}
+
+\begin{prosbox}
+\textbf{Pros.}
+CFG gives cyclomatic complexity and loop detection for free. Call graph
+connects directly to your existing \texttt{FUNCTION} and
+\texttt{EXTERNAL\_PACKAGE} nodes with no new node types. Exception flow
+graph is particularly valuable for Apache Java projects where exception
+mishandling is a major bug class. Lock graphs detect deadlocks --- a real
+defect class in Apache concurrent components (ActiveMQ, etc.).
+\end{prosbox}
+
+\begin{consbox}
+\textbf{Cons.}
+No data semantics --- CFG alone cannot detect null-pointer dereferences or
+stale-value bugs. Incremental CFG update requires custom engineering.
+Context-insensitive call graph is imprecise for virtual dispatch in Java
+(produces spurious edges). Context-sensitive CG (SPARK/k-CFA) is expensive
+($O(n^3)$ worst case).
+\end{consbox}
+
+\paragraph{Java tooling.} Soot (CFG, CG), WALA (precise CG), Spoon
+(source-level CFG), RacerD (race/lock analysis).
+
+%%=============================================================================
+\section{Family 4: Data-Flow Representations}
+%%=============================================================================
+
+\subsection{What It Captures}
+
+The Data Flow Graph (DFG) connects each \emph{definition} of a variable to
+every \emph{use} it can reach (reaching definitions, def-use chains). SSA
+(Static Single Assignment) form makes each variable assigned exactly once,
+making def-use trivial and exact. Variants: use-def chains, live-variable
+analysis, available expressions, heap data flow.
+
+\paragraph{Graph encoding.}
+\begin{lstlisting}
+Operand(def,var=v) --DDG_REACHES--> Operand(use,var=v)
+Operand(use)       --USE_DEF-->     Operand(def)
+Statement          --KILLS_DEF-->   Operand(def)
+\end{lstlisting}
+
+\begin{effbox}
+\textbf{Efficiency.}
+Moderate. For $n$ statements and $m$ variables, the number of def-use edges
+is $O(n \cdot m)$ worst case, but in practice $O(n)$ for local variables (most
+variables have few definitions and uses). SSA form (Soot Shimple) is more
+compact: each variable has exactly one def-node. However, \emph{inter-procedural}
+data flow (tracking values across method boundaries) explodes combinatorially.
+Restricting to intra-procedural (per-function) data flow is the only practical
+choice for a full-history KG.
+\end{effbox}
+
+\begin{diffbox}
+\textbf{Difference Modeling.}
+Hard. Def-use chains are \emph{global within a function}: changing one assignment
+can invalidate many reaching-definition edges. A single added statement may
+kill existing def-use chains and create new ones throughout the function.
+Incremental data-flow analysis algorithms exist (Ryder 1988, Alpern et al.\
+1990) but are complex to implement and rarely used in practice. The most
+realistic approach: recompute the full DFG of any changed function. Store only
+the new DFG and diff it against the old at the edge level. This is correct but
+requires full re-analysis of each changed function per commit.
+\end{diffbox}
+
+\begin{implbox}
+\textbf{Prior Implementations and Difficulty.}
+Soot Jimple provides def-use chains over a 3-address IR. GraphCodeBERT's data
+flow extractor (Python-only in the original paper) has been ported to Java by
+several groups. WALA provides inter-procedural def-use. All are
+production-ready for \emph{batch} computation. \emph{Incremental} def-use
+update: not available off-the-shelf --- requires a custom implementation
+using Soot as the underlying analysis engine. Difficulty: batch
+\textbf{easy}; incremental \textbf{hard}.
+\end{implbox}
+
+\begin{prosbox}
+\textbf{Pros.}
+The single highest-yield semantic relation for defect prediction.
+GraphCodeBERT's choice of data flow as its sole structural signal is strong
+empirical evidence. Directly encodes null-pointer, use-before-init, and
+stale-cache bugs --- the most common Apache defect classes. Clean graph
+structure with a small vocabulary.
+\end{prosbox}
+
+\begin{consbox}
+\textbf{Cons.}
+Imprecise for OO Java without alias analysis (field writes through references
+are not captured by local def-use). Incremental update requires full
+re-computation of changed functions. Requires IR compilation (Soot Jimple),
+adding a build-system dependency.
+\end{consbox}
+
+\paragraph{Java tooling.} Soot (Jimple def-use, Shimple SSA), WALA, Spoon
+(source-level approximations).
+
+%%=============================================================================
+\section{Family 5: Unified Dependence Representations (PDG / SDG / CPG)}
+\label{sec:pdg}
+%%=============================================================================
+
+\subsection{What It Captures}
+
+The Program Dependence Graph (PDG) merges control dependence (CDG) and data
+dependence (DDG). The System Dependence Graph (SDG) is the inter-procedural PDG.
+The Code Property Graph (CPG) further unifies AST $\cup$ CFG $\cup$ PDG into
+one multigraph, queryable with a graph traversal DSL.
+
+\paragraph{Graph encoding.}
+\begin{lstlisting}
+Function    --HAS_CPG_ENTRY-->  EntryNode
+EntryNode   --AST_CHILD[pos]--> ChildNode
+Block       --CFG_TRUE/NEXT-->  Block
+Predicate   --CDG_CONTROLS-->   Statement
+Operand(def)--DDG_REACHES-->    Operand(use)
+CallExpr    --CALLS-->          Function
+CallExpr    --ARG_TO[pos]-->    Param
+\end{lstlisting}
+
+\begin{effbox}
+\textbf{Efficiency.}
+High cost. The CPG = AST + CFG + PDG stacks three graphs on the same node set,
+multiplying edge count by $3$--$10\times$ relative to AST alone. A medium
+function (50 lines) produces 500--2000 CPG nodes and 1000--5000 CPG edges.
+For a project with $10^5$ functions and full commit history, the total CPG
+could reach $10^8$--$10^9$ edges. Joern mitigates this by storing CPGs in a
+specialised graph database (ShiftLeft Ocular / Neo4j backend). Basic-block
+granularity (rather than per-statement) reduces node count by $3$--$8\times$.
+\end{effbox}
+
+\begin{diffbox}
+\textbf{Difference Modeling.}
+Very hard. All three CPG layers are coupled: a changed statement touches AST
+nodes, CFG edges, and potentially many PDG edges simultaneously. No incremental
+CPG update algorithm is currently available. The practical approach (used in
+GraphSPD, S\&P 2023) is to: (1) build the CPG of the changed function
+\emph{before} the commit, (2) build it \emph{after}, (3) union them, linking
+corresponding nodes with \texttt{MAPPED\_TO} edges and tagging changed nodes
+with \texttt{DELTA\_STATUS}. This doubles the CPG size for changed functions
+but is semantically clean and the only unambiguous delta representation.
+\end{diffbox}
+
+\begin{implbox}
+\textbf{Prior Implementations and Difficulty.}
+\textbf{Joern} (open-source, Java/Scala) is production-ready and generates CPGs
+from Java source or bytecode with a single command. It ships with a Gremlin/DSL
+query interface. The delta-CPG (before+after union) is \emph{not} built into
+Joern --- a wrapper script must build both versions, emit two CPG files, and
+merge them. This is a moderate engineering task ($\approx$2--3 weeks).
+Difficulty: CPG construction \textbf{easy} (Joern); delta-CPG
+\textbf{moderate}.
+\end{implbox}
+
+\begin{prosbox}
+\textbf{Pros.}
+Subsumes Families 1--4 in one coherent schema. The academically-proven
+backbone for vulnerability and defect detection (Devign, ReVeal, GraphSPD,
+dozens of 2024--2025 papers). Node/edge vocabulary maps directly onto your
+existing KG. Joern's query DSL enables arbitrary pattern queries on the same
+graph. The single best structural choice for the backbone subgraph.
+\end{prosbox}
+
+\begin{consbox}
+\textbf{Cons.}
+Highest storage and computation cost of any representation. Joern has
+significant JVM startup overhead per analysis run. Delta-CPG construction
+requires two full CPG builds per changed function. The graph size can exceed
+KG storage budgets for full project histories at commit granularity. Not
+truly incremental.
+\end{consbox}
+
+\paragraph{Java tooling.} \textbf{Joern} (recommended), Soot (custom SDG),
+WALA (precise inter-procedural SDG).
+
+%%=============================================================================
+\section{Family 6: Formal and Semantic Analysis}
+%%=============================================================================
+
+\subsection{Abstract Interpretation}
+\label{sec:ai}
+
+Over-approximates all possible program states by propagating abstract values
+through the CFG until a fixpoint. Domains: sign/nullness, intervals, octagons,
+polyhedra, typestate, taint, constant propagation.
+
+\paragraph{Graph encoding.}
+\begin{lstlisting}
+Variable  --MAY_BE_NULL-->       Statement(dereference)
+Statement --PROPAGATES_TAINT-->  Statement
+Block     --ABSTRACT_VALUE[domain=nullness]--> LatticeElement
+\end{lstlisting}
+
+\begin{effbox}
+\textbf{Efficiency.}
+Highly domain-dependent. Nullness analysis: $O(n)$ per function, very cheap.
+Interval analysis: $O(n^2)$ with widening. Polyhedra: PSPACE-hard, not usable
+per commit. Taint analysis with fixed source/sink sets: $O(n)$.
+For KG-Commit the practical choice is a restricted set of cheap domains:
+nullness + taint. These add a small number of typed edges (typically
+$O(n)$ per function) and are efficiently storable.
+\end{effbox}
+
+\begin{diffbox}
+\textbf{Difference Modeling.}
+Hard in general. Abstract interpretation is a whole-function fixpoint
+computation --- a single changed statement can propagate to many abstract states
+throughout the function. Infer (Facebook) implements an \emph{incremental mode}
+(\texttt{--reactive}) that re-analyses only changed procedures, re-using cached
+summaries for unchanged callees. This is the only production-ready incremental
+abstract interpreter. For KG-Commit: run Infer in reactive mode per commit,
+diff the reported bugs (added/removed warnings) and store those as typed edges.
+\end{diffbox}
+
+\begin{implbox}
+\textbf{Prior Implementations and Difficulty.}
+\textbf{Infer} (Meta, open-source) is production-ready for Java, runs on CI,
+and has incremental mode. SpotBugs/FindBugs provide pattern-based analysis
+(not true abstract interpretation but cheap and ready). Full abstract domains
+(polyhedra, octagons): ASTR\'{E}E, Julia --- research/commercial tools, not
+easy to integrate. Difficulty: Infer + reactive mode \textbf{easy} to
+\textbf{moderate}; full abstract domains \textbf{hard}.
+\end{implbox}
+
+\begin{prosbox}
+\textbf{Pros.}
+Infer's incremental mode is essentially designed for the commit-level analysis
+loop. It directly outputs ``new bug introduced / existing bug removed'' per
+commit, which maps cleanly to KG edge insertions/deletions. Nullness analysis
+is the single most relevant domain for Apache Java (NPE is the \#1 bug class).
+\end{prosbox}
+
+\begin{consbox}
+\textbf{Cons.}
+Infer has significant false-positive rates (especially for concurrent code).
+Full abstract interpretation is too expensive for rich domains. Incremental
+mode requires a build system integration (Gradle/Maven) which adds pipeline
+complexity. Lattice-valued node attributes are not directly compatible with
+standard GNN aggregation.
+\end{consbox}
+
+\paragraph{Java tooling.} Infer (Meta), SpotBugs, Julia, Soot (extensible
+dataflow framework).
+
+\subsection{Alias and Points-To Analysis}
+\label{sec:alias}
+
+Answers ``can pointers \texttt{a} and \texttt{b} reference the same heap
+object?'' Produces a points-to graph, shape/heap graph, and alias sets.
+
+\paragraph{Graph encoding.}
+\begin{lstlisting}
+Variable         --POINTS_TO-->   AbstractLocation
+AbstractLocation --FIELD[f]-->    AbstractLocation
+Variable         --MAY_ALIAS-->   Variable
+\end{lstlisting}
+
+\begin{effbox}
+\textbf{Efficiency.}
+High cost. Andersen's algorithm: $O(n^3)$ time and $O(n^2)$ space. Flow-insensitive
+Steensgaard: $O(n \alpha(n))$ but less precise. For large Apache projects,
+whole-program alias analysis produces millions of may-alias pairs. Practical
+mitigation: restrict to intra-procedural alias within changed functions only;
+use demand-driven alias (compute only for variables accessed in the changed
+code).
+\end{effbox}
+
+\begin{diffbox}
+\textbf{Difference Modeling.}
+Extremely hard. Alias analysis is a global analysis --- a single field
+assignment in one method can change the points-to graph for the entire program.
+No practical incremental alias analysis is available for Java. The only
+realistic approach: recompute alias for changed functions only
+(intra-procedural, demand-driven), accepting imprecision for inter-procedural
+cases.
+\end{diffbox}
+
+\begin{implbox}
+\textbf{Prior Implementations and Difficulty.}
+Soot/SPARK and WALA are production tools for Java. Demand-driven alias (WALA
+Demand CG) is available. Incremental alias: not production-ready.
+Difficulty: batch intra-procedural \textbf{moderate}; full
+inter-procedural incremental \textbf{very hard}.
+\end{implbox}
+
+\begin{prosbox}
+\textbf{Pros.}
+Enables sound data-flow analysis for OO Java (without alias, DFG is imprecise
+for heap-traversing code). MAY\_ALIAS edges are a unique structural signal not
+present in any other family. Essential for field-access null-dereference bugs.
+\end{prosbox}
+
+\begin{consbox}
+\textbf{Cons.}
+Prohibitively expensive for whole-project incremental analysis. Generates
+enormous numbers of may-alias pairs (most spurious). Not incrementally
+maintainable. Should be treated as a selective enrichment, not a default layer.
+\end{consbox}
+
+\subsection{Taint / Information-Flow Analysis}
+
+Tags values at sources (user input, network) as tainted and tracks propagation
+to sinks (SQL queries, file writes, HTTP responses).
+
+\paragraph{Graph encoding.}
+\begin{lstlisting}
+Operand --TAINT_SOURCE-->    TaintLabel
+Operand --TAINT_FLOWS_TO-->  Operand
+Operand --TAINT_SINK-->      SinkType(SQL|HTTP|FILE)
+Statement --SANITIZES-->     TaintLabel
+\end{lstlisting}
+
+\begin{effbox}
+\textbf{Efficiency.}
+Linear in program size for fixed source/sink sets: $O(n)$ per function.
+Taint paths are sparse (few sources/sinks per function). Total taint edges
+across a project are modest. Queries (``is there a taint path from source $s$
+to sink $k$?'') are simple reachability queries on the taint subgraph.
+\end{effbox}
+
+\begin{diffbox}
+\textbf{Difference Modeling.}
+Moderate. Taint paths are explicit source$\to$sink chains. When code changes,
+re-run taint analysis on changed functions. New taint paths introduced by the
+commit are new edges; broken paths are removed edges. Joern's taint query
+system can be re-run incrementally by querying only changed CPG nodes.
+\end{diffbox}
+
+\begin{implbox}
+\textbf{Prior Implementations and Difficulty.}
+FlowDroid (TU Darmstadt, open-source) for Android/Java. Joern taint queries
+for server-side Java. Checker Framework \texttt{@Tainted} type qualifier.
+All are production-ready. Integration into KG-Commit requires a source/sink
+configuration file. Difficulty: \textbf{moderate}.
+\end{implbox}
+
+\begin{prosbox}
+\textbf{Pros.}
+Directly encodes injection and leakage bug classes. Apache web frameworks
+(e.g., Struts, CXF) have well-defined taint sources/sinks. Taint paths
+are interpretable, explicit graph edges.
+\end{prosbox}
+
+\begin{consbox}
+\textbf{Cons.}
+Requires alias analysis for precision (otherwise false positives). Source/sink
+configuration is application-specific and must be maintained. Not useful for
+non-security defect classes.
+\end{consbox}
+
+\subsection{Type Systems and Effect Types}
+
+Nullness types (\texttt{@NonNull}/\texttt{@Nullable}), ownership types,
+effect types (reads/writes/throws), typestate, gradual typing.
+
+\paragraph{Graph encoding.}
+\begin{lstlisting}
+Variable --HAS_NULLNESS-->  NullnessLabel(nullable|nonnull)
+Method   --HAS_EFFECT[kind]--> SideEffect
+Variable --TYPESTATE[s]-->  TypestateNode
+\end{lstlisting}
+
+\begin{effbox}
+\textbf{Efficiency.}
+Very cheap for annotation-based types (read annotations directly from source).
+Inferred type checking (NullAway, Checker Framework): $O(n)$ per function.
+Storage: one typed label per variable per program point --- compact.
+\end{effbox}
+
+\begin{diffbox}
+\textbf{Difference Modeling.}
+Simple. When a function changes, re-run the type checker on that function.
+New violations = new edges; resolved violations = removed edges. If annotations
+are added/removed in the commit, those are direct KG edge insertions/deletions.
+\end{diffbox}
+
+\begin{implbox}
+\textbf{Prior Implementations and Difficulty.}
+\textbf{NullAway} (Uber, open-source, annotation-based nullness), \textbf{Checker
+Framework} (extensible pluggable type systems), \textbf{JSpecify} (emerging
+standard). All production-ready. Difficulty: \textbf{easy}.
+\end{implbox}
+
+\begin{prosbox}
+\textbf{Pros.}
+Nullness types are the most directly NPE-predictive signal. Many Apache projects
+already use \texttt{@NonNull}/\texttt{@Nullable} annotations --- these are free
+labels. Cheap to compute and store.
+\end{prosbox}
+
+\begin{consbox}
+\textbf{Cons.}
+Annotation coverage is incomplete in most codebases. Inferred types are
+conservative (many unknowns). Not useful for logic bugs unrelated to typing.
+\end{consbox}
+
+\paragraph{Java tooling.} NullAway, Checker Framework, JSpecify, Infer.
+
+\subsection{Symbolic Execution and Path Constraints}
+
+Replaces concrete inputs with symbolic variables, explores all execution paths,
+accumulates path constraints (conjunctions of predicates), checks feasibility
+with an SMT solver.
+
+\paragraph{Graph encoding.}
+\begin{lstlisting}
+Block --PATH_CONDITION-->  Formula(SMT_string)
+Block --INFEASIBLE_PATH--> Block   (UNSAT)
+SymbolicState --FORKS_AT--> Predicate
+\end{lstlisting}
+
+\begin{effbox}
+\textbf{Efficiency.}
+Very high cost. The symbolic execution tree is exponential in the number of
+branches. For a function with 20 branches, the tree has up to $2^{20}$ leaves.
+Practical tools use heuristics (path merging, loop summarisation) to bound
+the tree. For a commit-level KG over a full project history, full symbolic
+execution is impractical. Selective use (changed functions only, bounded
+depth) is the only viable approach.
+\end{effbox}
+
+\begin{diffbox}
+\textbf{Difference Modeling.}
+Hard. Symbolic execution trees are not differentiable. When code changes, the
+tree must be recomputed. However, \emph{infeasibility edges}
+(``this CFG path is unreachable'') are a compact derived representation that
+can be stored as a small set of edges per function and re-derived cheaply for
+changed functions.
+\end{diffbox}
+
+\begin{implbox}
+\textbf{Prior Implementations and Difficulty.}
+SPF (Symbolic PathFinder, JPF-based, open-source), JDart (Java), EvoSuite
+(concolic, production-ready for test generation). None are designed for
+incremental per-commit KG integration. Neuro-symbolic hybrid (NeuroSE, NDSS
+2019) is research-grade. Difficulty: \textbf{very hard}.
+\end{implbox}
+
+\begin{prosbox}
+\textbf{Pros.}
+Highest-precision analysis available. Infeasibility annotations directly
+prune false-positive paths. Path constraints can be stored as node properties
+and used as rich features for GNN message passing.
+\end{prosbox}
+
+\begin{consbox}
+\textbf{Cons.}
+Exponential cost makes it impractical for routine per-commit analysis.
+Path explosion is not solvable in general. SMT solver calls add significant
+latency. Should be considered only for selective, high-value targets (e.g.,
+security-critical functions flagged by taint analysis).
+\end{consbox}
+
+\subsection{Formal Contracts (JML / Design by Contract)}
+
+Pre-conditions, post-conditions, class invariants as first-class program
+entities (JML annotations, \texttt{assert}, Guava \texttt{Preconditions}).
+
+\paragraph{Graph encoding.}
+\begin{lstlisting}
+Method --PRECONDITION-->  Formula
+Method --POSTCONDITION--> Formula
+Class  --INVARIANT-->     Formula
+\end{lstlisting}
+
+\begin{effbox}
+\textbf{Efficiency.}
+Very cheap when mined from existing annotations (\texttt{@requires},
+\texttt{Objects.requireNonNull}, Guava checks). One node per contract per
+method. Storage is $O(M)$ for $M$ annotated methods.
+\end{effbox}
+
+\begin{diffbox}
+\textbf{Difference Modeling.}
+Simple. Annotation changes are directly detectable in the AST diff (a
+\texttt{@NonNull} annotation added or removed is a GumTree
+\texttt{insert}/\texttt{delete} action). New/removed contract nodes are
+straightforward KG updates.
+\end{diffbox}
+
+\begin{implbox}
+\textbf{Prior Implementations and Difficulty.}
+OpenJML (JML checker, open-source), ESC/Java2 (research), Checker Framework
+(annotation-based contracts). Mining implicit contracts from
+\texttt{assert} statements: trivial via AST traversal. Difficulty:
+\textbf{easy} for annotation-based; \textbf{hard} for inferred contracts.
+\end{implbox}
+
+\begin{prosbox}
+\textbf{Pros.}
+Cheap and interpretable. Apache projects use Guava Preconditions extensively.
+Contract violations are direct defect signals. Contract additions in a commit
+are a strong signal of a previous latent bug.
+\end{prosbox}
+
+\begin{consbox}
+\textbf{Cons.}
+Most Apache code is not annotated with JML. Mining implicit contracts
+(from asserts) misses many real preconditions. Formal verification is
+expensive.
+\end{consbox}
+
+\paragraph{Java tooling.} OpenJML, Checker Framework, Guava/Apache Commons
+Preconditions mining via AST.
+
+%%=============================================================================
+\section{Family 7: Program Slicing}
+%%=============================================================================
+
+\subsection{What It Captures}
+
+A backward static slice with criterion $(stmt, var)$ = all statements that
+\emph{may} have influenced $var$ at $stmt$ (PDG backward reachability).
+Forward slice = all statements $var$ at $stmt$ may influence. Dynamic slices
+restrict to a specific execution trace.
+
+\paragraph{Graph encoding.}
+\begin{lstlisting}
+Statement --IN_BACKWARD_SLICE[criterion=(s,v)]--> SliceCriterion
+Statement --IN_FORWARD_SLICE[criterion=(s,v)]-->  SliceCriterion
+SliceCriterion --OBSERVED_AT--> Statement
+\end{lstlisting}
+
+\begin{effbox}
+\textbf{Efficiency.}
+Static slice computation: $O(|PDG|)$ per criterion (graph traversal). If the
+PDG already exists, slices are almost free. Storing all slices for all criteria
+is expensive ($O(|PDG|^2)$ in the worst case). Practical approach: store only
+\emph{slice sizes} as node attributes on Statement nodes (a highly predictive
+hand-crafted feature) rather than explicit slice membership edges.
+Dynamic slices: require trace execution, storage is proportional to trace
+length --- expensive.
+\end{effbox}
+
+\begin{diffbox}
+\textbf{Difference Modeling.}
+Moderate. Slices are derivable from the PDG, so if the PDG is incrementally
+updated (per changed function), slice criteria that overlap the change can be
+re-derived. Static backward slice size is a cheap commit-level feature:
+``how much code does the changed statement's backward slice cover before
+vs.\ after the commit?''
+\end{diffbox}
+
+\begin{implbox}
+\textbf{Prior Implementations and Difficulty.}
+\textbf{JavaSlicer} (TU Munich, dynamic slicing, open-source).
+Soot (static backward/forward slice via PDG). Both are production-ready.
+Integrated slicing for commit-level prediction is not off-the-shelf but
+is straightforward given Soot's PDG. Difficulty: \textbf{moderate}.
+\end{implbox}
+
+\begin{prosbox}
+\textbf{Pros.}
+Backward slice size of the changed statement is one of the most powerful
+single features for fault localisation. Directly answers ``how much context
+does this change touch?'' Derivable from the PDG --- if you build the CPG,
+slices are a free by-product.
+\end{prosbox}
+
+\begin{consbox}
+\textbf{Cons.}
+Dynamic slicing requires running tests per commit. Static slices are
+over-approximations (include infeasible paths). Storing full slice membership
+as edges is too expensive. Useful mainly as scalar features derived from the PDG.
+\end{consbox}
+
+\paragraph{Java tooling.} JavaSlicer (dynamic), Soot PDG (static), WALA.
+
+%%=============================================================================
+\section{Family 8: IR and Low-Level Representations}
+%%=============================================================================
+
+\subsection{What It Captures}
+
+Java bytecode, Soot's Jimple (typed 3-address IR), Shimple (SSA Jimple),
+ProGraML (language-agnostic IR graph combining control+data+call), IR2Vec
+(learned IR instruction embeddings).
+
+\paragraph{Graph encoding.}
+Same CPG vocabulary but over IR instructions rather than source statements.
+Adds \texttt{PHI\_FUNCTION} nodes (SSA) and \texttt{LLVM\_USE} / \texttt{IR\_DEF}
+edges.
+
+\begin{effbox}
+\textbf{Efficiency.}
+IR is $3$--$5\times$ more verbose than source (many 3-address instructions per
+source line). Jimple for a 100-line Java function produces 400--800 instructions.
+SSA adds $\phi$-functions at join points. Total storage is moderate per function.
+However, source$\to$IR correspondence must be maintained (for alignment with
+diffs), adding bookkeeping overhead.
+\end{effbox}
+
+\begin{diffbox}
+\textbf{Difference Modeling.}
+Hard. IR instructions do not correspond 1:1 to source lines. Compiler
+transformations (inlining, constant folding, instruction scheduling) mean that
+a single source change can produce a large IR diff. Tracking the mapping
+from source diff to IR diff requires preserving \texttt{LineNumberTable}
+debug metadata. No standard tool for IR-level differencing exists.
+\end{diffbox}
+
+\begin{implbox}
+\textbf{Prior Implementations and Difficulty.}
+Soot Jimple/Shimple: production-ready (used in hundreds of papers). Soot's
+Java frontend maps source line numbers to Jimple instructions.
+ProGraML: designed for LLVM IR (C/C++) --- a Java port requires Soot Jimple
+emission + custom ProGraML-style graph builder. IR2Vec: LLVM-native.
+Difficulty: Jimple extraction \textbf{easy}; ProGraML-style Java graph
+\textbf{moderate}; IR differencing \textbf{hard}.
+\end{implbox}
+
+\begin{prosbox}
+\textbf{Pros.}
+More precise def-use analysis than source-level (no parsing ambiguities).
+Language-agnostic across all JVM languages. SSA form makes GNN message
+passing over def-use trivial. ProGraML's design is directly applicable if
+using LLVM-compiled Java (via JVM bytecode$\to$LLVM translators).
+\end{prosbox}
+
+\begin{consbox}
+\textbf{Cons.}
+Mapping back to source locations (needed for diff alignment) is error-prone.
+Adds a Soot compilation dependency to the pipeline. IR representations are
+harder to interpret and debug. Not a natural fit for commit-level delta
+computation.
+\end{consbox}
+
+\paragraph{Java tooling.} Soot (Jimple, Shimple), WALA (SSA-based IR),
+ASM (bytecode), ProGraML (LLVM IR).
+
+%%=============================================================================
+\section{Family 9: Dynamic and Runtime Representations}
+%%=============================================================================
+
+\subsection{What It Captures}
+
+Execution traces (instruction/method-call sequences), runtime value traces,
+coverage matrices (test$\times$statement binary matrix), dynamic invariants
+(Daikon), concolic execution.
+
+\paragraph{Graph encoding.}
+\begin{lstlisting}
+TraceEvent --NEXT_EVENT[step=i]--> TraceEvent
+TraceEvent --AT_STATEMENT-->       Statement
+Test       --COVERS-->             Statement
+Test       --RESULT-->             PassFail
+Method     --DYNAMIC_PRECOND-->    InvariantFormula
+\end{lstlisting}
+
+\begin{effbox}
+\textbf{Efficiency.}
+Very expensive. Full instruction traces for a Java application can be gigabytes
+per execution. Method-call traces are $100\times$ smaller but still large.
+Coverage matrices are compact ($|tests| \times |statements|$ binary matrix,
+typically sparse). Daikon invariants are $O(|variables|)$ per program point ---
+compact. The real cost is \emph{re-executing the test suite for each historical
+commit}, not storage.
+\end{effbox}
+
+\begin{diffbox}
+\textbf{Difference Modeling.}
+Not applicable in the traditional sense. Traces are per-execution, not
+per-commit. To get commit-level dynamic features: check out each commit,
+compile, run tests, record coverage/traces. This pipeline is used by mutation
+testing research but is extremely expensive for full repo histories.
+Coverage diff (which statements gained/lost coverage between commits) is a
+useful lightweight variant.
+\end{diffbox}
+
+\begin{implbox}
+\textbf{Prior Implementations and Difficulty.}
+\textbf{Daikon} (dynamic invariants, production-ready).
+\textbf{JaCoCo} (coverage, production-ready, integrates with Maven/Gradle).
+\textbf{JavaSlicer} (dynamic slicing, production-ready).
+\textbf{PIT} (mutation testing, production-ready).
+All require a working build and test suite. Historical commit re-execution:
+requires a CI-like pipeline per commit. Difficulty: per-commit re-execution
+infrastructure \textbf{hard}; using existing CI traces \textbf{moderate}.
+\end{implbox}
+
+\begin{prosbox}
+\textbf{Pros.}
+Ground-truth runtime behaviour --- eliminates static analysis false positives
+on the executed path. Coverage matrices are proven effective for fault
+localisation (ICSE 2021). Daikon invariants are highly interpretable and
+often catch pre/post condition violations that static analysis misses.
+\end{prosbox}
+
+\begin{consbox}
+\textbf{Cons.}
+Requires compiling and running every historical commit --- many commits in the
+Apache corpus do not compile cleanly in isolation. Test coverage is limited
+(uncovered paths produce no signal). Serious leakage risk: traces from
+post-fix commits include the fix; must use pre-commit test suite only.
+\end{consbox}
+
+\paragraph{Java tooling.} Daikon, JaCoCo, JavaSlicer, PIT, EvoSuite.
+
+%%=============================================================================
+\section{Family 10: Change and Delta Representations}
+%%=============================================================================
+
+\subsection{What It Captures}
+
+Line-based diffs, AST edit scripts (GumTree), delta CPG (before+after CPG
+union), semantic change taxonomies, hunk-level representations, bi-modal
+change+message embeddings (CC2Vec, BiCC-BERT).
+
+\paragraph{Graph encoding.}
+\begin{lstlisting}
+Commit      --EDITS[action=insert]--> ASTNode(after)
+Commit      --EDITS[action=delete]--> ASTNode(before)
+ASTNode(bef)--MAPPED_TO-->            ASTNode(aft)
+ASTNode     --CHANGED_IN-->           Commit
+CPGNode     --STATUS-->   {added|deleted|modified|unchanged}
+\end{lstlisting}
+
+\begin{effbox}
+\textbf{Efficiency.}
+Excellent. AST edit scripts are small: typically $O(k)$ operations for a commit
+touching $k$ AST nodes. Delta CPG stores only changed-function subgraphs
+(before+after). Line-level diff: a handful of integers per changed line.
+This is by far the most storage-efficient semantic representation for a
+commit-centric KG. The delta \emph{is} the representation --- no redundant
+snapshot needed.
+\end{effbox}
+
+\begin{diffbox}
+\textbf{Difference Modeling.}
+By definition, this family IS the difference. GumTree produces an edit script
+in $O(n \log n)$ for the 2024 redesign. The delta is unambiguous in the sense
+that it is computed from well-defined before/after snapshots. The only
+ambiguity is in edit-script minimality (multiple minimum-cost scripts may
+exist). Space: $O(k)$ for $k$ changed nodes --- optimal. The delta CPG
+(GraphSPD approach) stores before+after CPG for changed functions only,
+linking them with \texttt{MAPPED\_TO} edges.
+\end{diffbox}
+
+\begin{implbox}
+\textbf{Prior Implementations and Difficulty.}
+\textbf{GumTree}: production-ready Java library. ChangeDistiller: Java,
+research-grade.
+\textbf{CC2Vec}: PyTorch, research code available.
+\textbf{BiCC-BERT}: paper available, training code partially released.
+\textbf{Delta CPG} (before+after union): not a standalone tool --- requires
+Joern + a merge script. GraphSPD (S\&P 2023) provides a reference implementation
+for C/C++; a Java port requires moderate effort.
+Difficulty: GumTree \textbf{very easy}; delta CPG \textbf{moderate};
+full BiCC-BERT pretraining \textbf{hard}.
+\end{implbox}
+
+\begin{prosbox}
+\textbf{Pros.}
+Perfect fit for the JIT setting: the commit IS the delta. Minimal storage
+overhead. GumTree edit scripts are the most semantically precise change
+representation available. Directly anchors all other semantic layers
+(changed CPG nodes are the subset of the full CPG that need re-analysis).
+The open research gap (semantic change-graph for JIT-DP) is directly addressed
+here.
+\end{prosbox}
+
+\begin{consbox}
+\textbf{Cons.}
+Delta CPG requires full CPG builds for before+after versions of changed
+functions, which is expensive. GumTree edit scripts are non-unique (multiple
+valid scripts for the same change). Inter-procedural change effects (commit
+edits method A, defect surfaces in caller B) are not captured by
+function-local deltas.
+\end{consbox}
+
+\paragraph{Java tooling.} GumTree, ChangeDistiller, Joern (for CPG),
+CC2Vec (PyTorch), BiCC-BERT.
+
+%%=============================================================================
+\section{Family 11: Natural Language and Multi-Modal Representations}
+%%=============================================================================
+
+\subsection{What It Captures}
+
+Commit messages, code comments (Javadoc, inline), bug reports and issue
+trackers (titles, descriptions, severity, stack traces), code review comments,
+API documentation and behavioural specifications.
+
+\paragraph{Graph encoding.}
+\begin{lstlisting}
+Commit      --HAS_MESSAGE-->      MessageNode
+MessageNode --HAS_INTENT-->       IntentLabel(fix|feat|refactor)
+Commit      --FIXES-->            Issue
+Issue       --CONTAINS_STACKTRACE--> StackTrace
+StackTrace  --FRAME[depth=i]-->   StackFrame
+StackFrame  --AT_METHOD-->        Function
+ReviewComment --ON_LINE-->        DiffLine
+\end{lstlisting}
+
+\begin{effbox}
+\textbf{Efficiency.}
+Very cheap. Commit messages are short strings (median $\sim$8 words in Apache
+repos). Embedding vectors are fixed-size ($768$ or $1024$ floats). Issue
+descriptions are larger but rare relative to commits. Stack trace frames are
+small ($\sim$10--50 frames). Total overhead: a few kilobytes per commit for
+text plus one embedding vector per entity. The cheapest semantic representation.
+\end{effbox}
+
+\begin{diffbox}
+\textbf{Difference Modeling.}
+Natural --- commit messages and review comments are inherently per-commit.
+Each new commit brings a new message node and (possibly) new issue/review links.
+No diff computation is needed: just append the new NL nodes and their edges.
+Issue links (\texttt{FIXES \#1234}) are extractable from the commit message with
+a regex. Stack traces in issue descriptions can be parsed and linked to FUNCTION
+nodes. This is the cleanest ``one node per commit'' update model of any family.
+\end{diffbox}
+
+\begin{implbox}
+\textbf{Prior Implementations and Difficulty.}
+\textbf{git log} provides commit messages. GitHub/Jira REST APIs provide issue
+data. BERT/RoBERTa/CodeBERT embeddings via HuggingFace: one-line inference.
+BiCC-BERT (bi-modal change+message): pretraining code partially available.
+Intent classification (bug-fix vs.\ feature vs.\ refactor): SZZ-based labels,
+fine-tuned BERT classifiers exist.
+Stack trace parsing: custom regex, trivial. Difficulty: \textbf{very easy}.
+\end{implbox}
+
+\begin{prosbox}
+\textbf{Pros.}
+Cheapest feature with high signal. Intent classification (``fix'' commits
+are labelled defect-introducing in many studies). Stack traces directly link
+NL context to code locations. Review comments are oracle-quality labels
+(a reviewer flagging an NPE is nearly ground truth). Directly extends your
+existing \texttt{COMMIT} and \texttt{ISSUE} nodes --- no new infrastructure.
+\end{prosbox}
+
+\begin{consbox}
+\textbf{Cons.}
+Inconsistent quality: many Apache commits have poor or empty messages
+(``minor fix'', ``WIP''). Issue linkage is incomplete (not all commits
+reference issues). Leakage risk: review comments appear \emph{after} the
+commit is submitted; they may encode post-fix context.
+\end{consbox}
+
+\paragraph{Java tooling.} git log, JGit, GitHub/Jira REST API, HuggingFace
+Transformers, custom stack-trace parser.
+
+%%=============================================================================
+\section{Family 12: Code Metrics and Feature Vectors}
+%%=============================================================================
+
+\subsection{What It Captures}
+
+Scalar hand-crafted features: code complexity metrics (cyclomatic complexity,
+LOC, nesting depth, fan-in/out, Halstead volume), OO metrics (CK suite: WMC,
+DIT, NOC, CBO, LCOM, RFC), process/change metrics (churn, age, \# authors,
+fix frequency, change burst).
+
+\paragraph{Graph encoding.}
+\begin{lstlisting}
+Function --HAS_METRIC[name=cyclomatic]--> MetricValue(float)
+Class    --HAS_METRIC[name=CBO]-->        MetricValue(float)
+File     --HAS_METRIC[name=churn_30d]-->  MetricValue(float)
+\end{lstlisting}
+
+\begin{effbox}
+\textbf{Efficiency.}
+Extremely efficient. A handful of scalar values per function/class.
+Storage: $O(F \times M)$ for $F$ functions and $M$ metrics --- a tiny fraction
+of any other representation. Queries are $O(1)$ lookups. No complex graph
+traversal needed. This is the cheapest possible semantic enrichment.
+\end{effbox}
+
+\begin{diffbox}
+\textbf{Difference Modeling.}
+Trivial. Re-compute metrics only for changed functions/classes per commit.
+Store the \emph{delta} metric value (new $-$ old) as an additional edge.
+``Cyclomatic complexity increased by 3 in this commit'' is a directly stored
+property. Process metrics (churn, age, \# authors) are updated with each commit
+by simple counter increments. Completely unambiguous.
+\end{diffbox}
+
+\begin{implbox}
+\textbf{Prior Implementations and Difficulty.}
+\textbf{CK} (Java CK metrics library, one-JAR, production-ready).
+\textbf{PMD}, \textbf{Checkstyle}, \textbf{SonarQube} (production-ready,
+CI-integrated). JavaNCSS for NCSS/Halstead. Git-derived process metrics:
+trivially computable from \texttt{git log --numstat}. Your existing
+\texttt{graph.py} already computes \texttt{la} and \texttt{ld} --- this is
+an extension of that pattern. Difficulty: \textbf{very easy}.
+\end{implbox}
+
+\begin{prosbox}
+\textbf{Pros.}
+Proven baselines in defect prediction literature. Directly plug into your
+existing aggregate-feature design in \texttt{graph.py} with zero GNN
+engineering. Interpretable and explainable. Process metrics (fix frequency,
+author count) are among the strongest predictors in JIT-DP studies (LaPredict,
+JITLine).
+\end{prosbox}
+
+\begin{consbox}
+\textbf{Cons.}
+Surface-level proxies. Many metrics (LOC, complexity) plateau in predictive
+power with more training data. Cannot encode semantic bugs (a perfectly
+simple function can still be buggy). Metrics ignore what the code \emph{does}.
+\end{consbox}
+
+\paragraph{Java tooling.} CK, PMD, SonarQube, JavaNCSS, git log.
+
+%%=============================================================================
+\section{Family 13: Clone and Pattern Representations}
+%%=============================================================================
+
+\subsection{What It Captures}
+
+Code clone pairs (Type 1--4), design pattern instances (Singleton, Observer,
+Factory\ldots), code smells (God Class, Long Method, Feature Envy,
+Data Clumps), Self-Admitted Technical Debt (SATD from TODO/FIXME comments).
+
+\paragraph{Graph encoding.}
+\begin{lstlisting}
+Function --IS_CLONE_OF[type=2]-->    Function
+Class    --IMPLEMENTS_PATTERN-->     DesignPattern(name)
+Class    --HAS_SMELL-->              CodeSmell(name=GodClass)
+Comment  --IS_SATD-->                SATDCategory(design|defect)
+\end{lstlisting}
+
+\begin{effbox}
+\textbf{Efficiency.}
+Clone detection: $O(n^2)$ naive pairwise, but LSH/shingling-based tools
+(SourcererCC) scale near-linearly. Clone graph is sparse in practice.
+Smell detection: $O(n)$ once metrics are computed (derived from CK metrics).
+SATD detection: $O(n)$ comment scanning. Design pattern detection: $O(n)$
+AST structural matching. All are cheap relative to semantic analyses.
+\end{effbox}
+
+\begin{diffbox}
+\textbf{Difference Modeling.}
+Clone detection: new clones can be introduced (copy-paste of a changed
+function) or existing clones broken (one copy diverges). Incremental clone
+detection requires re-checking only the changed functions against all existing
+functions. SourcererCC supports an incremental mode. Smell detection: re-run
+only on changed entities per commit ($O(1)$ per changed function). SATD:
+directly detectable in the diff (added/removed TODO/FIXME comments).
+\end{diffbox}
+
+\begin{implbox}
+\textbf{Prior Implementations and Difficulty.}
+\textbf{SourcererCC} (industrial-strength clone detection, production-ready,
+incremental mode). iClones (incremental, research-grade). Code smell detection:
+\textbf{PMD} rules, \textbf{SonarQube}, ML-based (ML-smell 2025). Design pattern
+detection: research tools (PatternBox, DPD). SATD: \textbf{SATDDetector}
+(open-source, uses SVM on comment text). Difficulty: smells + SATD
+\textbf{easy}; clone detection \textbf{moderate}; design patterns
+\textbf{moderate}.
+\end{implbox}
+
+\begin{prosbox}
+\textbf{Pros.}
+Clone pairs create explicit cross-file edges --- a bug fixed in one clone but
+not the other is directly detectable. SATD (TODO/FIXME) is one of the cheapest
+and most proven defect predictors. Code smells are interpretable proxies for
+architectural degradation. Design pattern violations can signal misuse.
+\end{prosbox}
+
+\begin{consbox}
+\textbf{Cons.}
+Clone detection at scale ($10^5$ functions $\times$ full history) is expensive.
+Design pattern detection has false positives. Smells are noisy proxies --- many
+God Classes have no bugs. SATD detection accuracy depends on comment quality.
+\end{consbox}
+
+\paragraph{Java tooling.} SourcererCC, PMD, SonarQube, SATDDetector.
+
+%%=============================================================================
+\section{Family 14: Learned and Neural Representations}
+%%=============================================================================
+
+\subsection{What It Captures}
+
+Pre-trained code LMs (CodeBERT, GraphCodeBERT, CodeT5, UniXcoder), GNN
+architectures (GCN, GAT, GGNN, R-GCN, HGT), path-based embeddings (code2vec,
+code2seq, ASTNN), contrastive/self-supervised code representations (DOBF,
+DISCO).
+
+\paragraph{Graph encoding.}
+Node embeddings as attributes:
+\begin{lstlisting}
+Node --HAS_EMBEDDING[model=GraphCodeBERT]--> Vector(float[768])
+\end{lstlisting}
+GNN propagation over the CPG / delta-CPG structure.
+
+\begin{effbox}
+\textbf{Efficiency.}
+Inference cost: a CodeBERT forward pass takes $\sim$50--200ms per function
+on GPU, $\sim$2--10s on CPU. Storing embedding vectors: $768 \times 4$ bytes
+$= 3$KB per node. For $10^6$ function nodes: $\sim$3GB just for embeddings.
+GNN re-propagation per changed subgraph: $O(|edges| \times \text{layers})$.
+GPU infrastructure is required for production-speed embedding generation.
+Total cost is high but \emph{amortisable}: compute once and store; recompute
+only for changed functions.
+\end{effbox}
+
+\begin{diffbox}
+\textbf{Difference Modeling.}
+When a function changes, its token sequence changes $\Rightarrow$ its LM
+embedding must be recomputed (one forward pass per changed function, $\sim$100ms
+on GPU). The GNN propagation must also be re-run for the changed subgraph
+(neighbourhood of changed nodes). For a commit touching 10 functions:
+$\sim$1--2s on GPU. The incremental update is clean: identify changed function
+nodes, recompute their embeddings, re-run GNN propagation on their
+neighbourhoods.
+\end{diffbox}
+
+\begin{implbox}
+\textbf{Prior Implementations and Difficulty.}
+\textbf{HuggingFace Transformers}: all major code LMs are one-line inference.
+\textbf{PyTorch Geometric} / \textbf{DGL}: production-ready GNN libraries.
+Devign (GGNN over CPG): reference code available (research-grade).
+End-to-end JIT-DP with GNN: no production-ready pipeline exists, but the
+components are all available. Difficulty: embedding generation \textbf{easy};
+GNN training on CPG \textbf{moderate}; full end-to-end JIT-GNN
+\textbf{hard}.
+\end{implbox}
+
+\begin{prosbox}
+\textbf{Pros.}
+State-of-the-art accuracy on most code intelligence benchmarks.
+Pre-trained models transfer across projects with no fine-tuning.
+Captures semantic meaning of identifier names (``\texttt{isNull}'' vs.\
+``\texttt{validate}''). GraphCodeBERT's data-flow-aware pretraining aligns
+exactly with Family 4. HGT handles your heterogeneous node/edge types natively.
+\end{prosbox}
+
+\begin{consbox}
+\textbf{Cons.}
+Black-box: not interpretable. Requires GPU infrastructure. Embedding
+recomputation per changed function adds latency to the online learning loop.
+Pre-trained models may be biased toward common programming patterns
+(underrepresented in Apache-style server-side Java). Very high engineering
+complexity to integrate end-to-end.
+\end{consbox}
+
+\paragraph{Java tooling.} HuggingFace Transformers, PyTorch Geometric, DGL,
+Joern + custom GNN wrapper.
+
+%%=============================================================================
+\section{Family 15: Inter-Procedural and Architectural Representations}
+%%=============================================================================
+
+\subsection{What It Captures}
+
+Context-sensitive call graphs (k-CFA, object-sensitive), module/package
+dependency graphs, co-change graphs (files that change together in commits),
+developer expertise and ownership graphs.
+
+\paragraph{Graph encoding.}
+\begin{lstlisting}
+Package --DEPENDS_ON-->              Package
+Package --VIOLATES_LAYER-->          Package
+File    --CO_CHANGES_WITH[freq=n]--> File
+Author  --OWNS[fraction=0.7]-->      File
+\end{lstlisting}
+
+\begin{effbox}
+\textbf{Efficiency.}
+Call graph: $O(M + C)$ for $M$ methods and $C$ call sites --- compact.
+Module dependency: $O(P^2)$ worst case for $P$ packages but very sparse in
+practice ($P \approx 100$--$1000$). Co-change graph: $O(F^2)$ worst case for
+$F$ files but sparse ($F \approx 10^3$--$10^4$). Ownership vectors: $O(F
+\times A)$ for $A$ authors --- compact. All are low-storage relative to
+intra-procedural analyses.
+\end{effbox}
+
+\begin{diffbox}
+\textbf{Difference Modeling.}
+Naturally incremental. Call graph: update edges for new/removed/changed call
+sites per commit. Module dependency: update when \texttt{import} statements
+change. Co-change graph: append new co-occurrence counts for files changed
+together in the new commit. Ownership: update line-ownership fractions per
+commit (git blame delta). All are $O(\text{changed entities})$ updates ---
+excellent for the KG-Commit incremental model.
+\end{diffbox}
+
+\begin{implbox}
+\textbf{Prior Implementations and Difficulty.}
+Call graph: Soot/WALA (production-ready). Module dependency: JavaParser
+(trivial, $<$1 day). Co-change graph: custom git log mining (trivial, 1--2
+days). Ownership: \texttt{git blame} wrapper (trivial). Difficulty:
+\textbf{very easy} to \textbf{easy} for all components.
+\end{implbox}
+
+\begin{prosbox}
+\textbf{Pros.}
+Co-change graph captures implicit coupling not in the static dependency graph
+--- files that always change together but have no import relationship.
+Ownership/expertise: low-ownership files have higher defect rates (proven in
+large-scale studies). Module dependency layering violations are structural
+defect predictors. All are naturally incremental --- perfect for KG-Commit.
+\end{prosbox}
+
+\begin{consbox}
+\textbf{Cons.}
+Co-change requires a historical baseline (cold-start problem for new repos).
+Context-sensitive call graph (SPARK/k-CFA) is expensive for large projects.
+Ownership metrics are noisy for files with many small contributors.
+\end{consbox}
+
+\paragraph{Java tooling.} Soot/WALA (call graph), JavaParser (imports),
+git log (co-change, ownership).
+
+%%=============================================================================
+\section{Family 16: Binary and Compiled Representations}
+%%=============================================================================
+
+\subsection{What It Captures}
+
+Java bytecode (opcode sequences, $n$-grams), binary CFG (reconstructed from
+disassembly), binary call graph, Bin2Vec (learned binary function embeddings),
+BinVuGAL (GNN over binary CFG), LLM-assisted decompilation.
+
+\paragraph{Graph encoding.}
+\begin{lstlisting}
+BinaryFunction --BINARY_CFG_NEXT-->  BinaryBlock
+BinaryBlock    --OPCODE_SEQ[pos]-->  Opcode
+BinaryFunction --BINARY_CALLS-->     BinaryFunction
+\end{lstlisting}
+
+\begin{effbox}
+\textbf{Efficiency.}
+Binary CFGs are smaller than source CFGs (optimising compiler reduces branch
+count). Opcode $n$-grams: compact vectors. Binary function embeddings
+(Bin2Vec): $768$-float vectors, same cost as LM embeddings. However, binary
+analysis tools (Ghidra, IDA Pro) are heavyweight and slow to initialise.
+Soot operating on \texttt{.class} files is efficient and avoids full binary
+disassembly.
+\end{effbox}
+
+\begin{diffbox}
+\textbf{Difference Modeling.}
+Hard. Binary diffs are semantically opaque. Recompilation must happen per
+commit. Binary similarity tools are not designed for delta computation. For
+JVM bytecode via Soot: the \texttt{.class} files change whenever a
+\texttt{.java} file changes, so bytecode-level diff is tightly coupled to
+source-level diff. Mapping binary diff to source diff requires
+\texttt{LineNumberTable} metadata, which is present in debug builds.
+\end{diffbox}
+
+\begin{implbox}
+\textbf{Prior Implementations and Difficulty.}
+\textbf{Soot} (bytecode analysis, production-ready). \textbf{Ghidra}
+(binary analysis, open-source, production-ready). Bin2Vec, BinVuGAL: research
+code. LLM-assisted decompilation (VulBinLLM 2025): very recent, not
+production-ready. Difficulty: Soot bytecode \textbf{easy};
+binary-level analysis \textbf{hard}; decompilation \textbf{very hard}.
+\end{implbox}
+
+\begin{prosbox}
+\textbf{Pros.}
+Works without source code --- covers vendored JARs and native JNI components.
+Language-agnostic across all JVM languages. Soot's bytecode mode is the most
+reliable Java analysis option when source is unavailable.
+\end{prosbox}
+
+\begin{consbox}
+\textbf{Cons.}
+Source is available for all Apache repos in the corpus --- binary analysis
+adds complexity for no gain when source is accessible. Mapping binary locations
+back to source lines for diff alignment is fragile. Not needed for the primary
+use case.
+\end{consbox}
+
+\paragraph{Java tooling.} Soot (bytecode), Ghidra, ASM, Bin2Vec (PyTorch).
+
+%%=============================================================================
+\section{Universal Graph Encoding of Non-Graph Representations}
+%%=============================================================================
+
+Any finite representation can be encoded as a graph. Table~\ref{tab:encoding}
+gives the translation recipe.
+
+\begin{longtable}{p{3cm}p{4cm}p{5cm}}
+\caption{Encoding non-graph representations as KG subgraphs.}
+\label{tab:encoding}\\
+\toprule
+\textbf{Original form} & \textbf{Transformation} & \textbf{Graph model} \\
+\midrule
+\endhead
+Token sequence & Chain graph & \texttt{Token --NEXT--> Token[pos]} \\
+$n$-gram bag & Shared-context star & \texttt{Token --CONTEXT--> Token[+n]} \\
+Feature vector & Star graph & \texttt{Entity --HAS\_METRIC[name]--> Value} \\
+Coverage matrix & Bipartite graph & \texttt{Test --COVERS--> Statement} \\
+Edit script & Event nodes & \texttt{Commit --EDITS[action]--> ASTNode} \\
+Lattice value & Typed edge & \texttt{Var --MAY\_BE\_NULL--> Deref} \\
+Path constraint & Node property & \texttt{Block --PATH\_COND--> Formula} \\
+Execution trace & Temporal chain & \texttt{Event --NEXT[step]--> Event} \\
+Embedding vector & Node property & \texttt{Node --EMBEDDING[model]--> Float[d]} \\
+Dynamic invariant & Typed edge & \texttt{Method --INVARIANT--> Formula} \\
+Clone pair & Cross-link & \texttt{Func --IS\_CLONE\_OF[type]--> Func} \\
+Review comment & Annotation node & \texttt{DiffLine --HAS\_REVIEW--> Comment} \\
+Stack trace & Frame chain & \texttt{Frame[i] --NEXT\_FRAME--> Frame[i+1]} \\
+\bottomrule
+\end{longtable}
+
+%%=============================================================================
+\section{Comprehensive Comparison}
+%%=============================================================================
+
+\begin{longtable}{p{2.9cm}p{1.4cm}p{1.4cm}p{1.4cm}p{1.5cm}p{1.7cm}p{1.7cm}}
+\toprule
+\textbf{Family} & \textbf{Synt.} & \textbf{Ctrl.} & \textbf{Data} & \textbf{Cost} & \textbf{$\Delta$ diff} & \textbf{Leak risk} \\
+\midrule
+\endhead
+Token sequences       & \checkmark & --         & --         & Very low  & Trivial   & None \\
+AST                   & \checkmark & --         & --         & Low       & Easy      & None \\
+CFG                   & --         & \checkmark & --         & Low       & Moderate  & None \\
+CDG                   & --         & \checkmark & --         & Low       & Moderate  & None \\
+DFG / def-use         & --         & --         & \checkmark & Medium    & Hard      & None \\
+PDG                   & --         & \checkmark & \checkmark & Medium    & Hard      & None \\
+CPG                   & \checkmark & \checkmark & \checkmark & Medium    & Very hard & None \\
+Alias / heap          & --         & --         & \checkmark & High      & V.\ hard  & None \\
+Taint paths           & --         & --         & \checkmark & Medium    & Moderate  & None \\
+Abstract interp.      & --         & \checkmark & \checkmark & High      & Moderate* & None \\
+Symbolic exec.        & --         & \checkmark & \checkmark & V.\ high  & Hard      & None \\
+Formal contracts      & --         & --         & \checkmark & Low       & Easy      & Possible \\
+Program slicing       & --         & \checkmark & \checkmark & Medium    & Moderate  & None \\
+IR / bytecode         & \checkmark & \checkmark & \checkmark & Medium    & Hard      & None \\
+Exec.\ traces         & --         & \checkmark & \checkmark & High      & N/A       & \textbf{High} \\
+Coverage matrices     & --         & --         & \checkmark & Medium    & Moderate  & \textbf{High} \\
+AST edit scripts      & \checkmark & --         & --         & Low       & Trivial   & None \\
+Delta CPG             & \checkmark & \checkmark & \checkmark & High      & Moderate  & None \\
+Commit messages       & --         & --         & --         & V.\ low   & Trivial   & None \\
+Code comments         & --         & --         & --         & V.\ low   & Trivial   & None \\
+Bug reports           & --         & --         & --         & Low       & Trivial   & Possible \\
+Review comments       & --         & --         & --         & Low       & Trivial   & Possible \\
+Code metrics          & \checkmark & \checkmark & --         & V.\ low   & Trivial   & None \\
+Clone pairs           & \checkmark & --         & \checkmark & Medium    & Moderate  & None \\
+Code smells           & \checkmark & \checkmark & --         & Low       & Trivial   & None \\
+Learned embed.        & \checkmark & \checkmark & \checkmark & Medium    & Easy      & None \\
+Co-change graph       & --         & --         & --         & Low       & Trivial   & None \\
+Dev.\ ownership       & --         & --         & --         & V.\ low   & Trivial   & None \\
+Binary / bytecode     & \checkmark & \checkmark & --         & Medium    & Hard      & None \\
+\bottomrule
+\multicolumn{7}{l}{\footnotesize * Infer reactive mode only.} \\
+\end{longtable}
+
+%%=============================================================================
+\section{Recommended Phased Integration Plan}
+%%=============================================================================
+
+\begin{enumerate}[leftmargin=1.5em]
+  \item \textbf{Phase 1 --- Metrics + NL (Week 1--2).}
+        CK metrics on changed functions. Commit message intent classification.
+        SATD detection. All plug into existing \texttt{get\_features()} with no
+        new infrastructure.
+
+  \item \textbf{Phase 2 --- AST + Edit Scripts.}
+        Add AST subgraph (tree-sitter or Spoon). Run GumTree per commit to produce
+        AST edit scripts. Store \texttt{EDITS[action]} edges on the Commit node.
+        These are the most cost-effective semantic change edges available.
+
+  \item \textbf{Phase 3 --- CFG + Call Graph (Week 4--6).}
+        Add CFG edges and inter-procedural call graph (Soot). Derive cyclomatic
+        complexity, \# back-edges, reachable-method count. Connect call edges to
+        existing FUNCTION nodes.
+
+  \item \textbf{Phase 4 --- Data Flow / CPG.}
+        Add def-use (DDG) edges via Soot Jimple, or generate full CPGs with Joern.
+        At this point the structural backbone is complete.
+
+  \item \textbf{Phase 5 --- Delta CPG.}
+        Implement the before+after CPG merge script on top of Joern. Tag
+        \texttt{CHANGED\_IN(commit)}, \texttt{MAPPED\_TO}, and
+        \texttt{DELTA\_STATUS} edges.
+
+  \item \textbf{Phase 6 --- Typed Semantic Edges.}
+        Run Infer (nullness/taint) in reactive mode per commit. Add
+        \texttt{MAY\_BE\_NULL}, \texttt{TAINT\_FLOWS\_TO} edges. Run NullAway for
+        annotation-based types.
+
+  \item \textbf{Phase 7 --- Content Embeddings + GNN.}
+        Initialise CPG nodes with GraphCodeBERT embeddings. Train an R-GCN or HGT
+        over the change-annotated CPG. Compare against Phase 1--6 aggregate-vector
+        baselines.
+
+  \item \textbf{Phase 8 --- Deep Semantic Enrichment.}
+        Add alias edges (WALA SPARK), exception flow graph (Robusta), concurrency
+        lock graphs (RacerD) selectively for high-value components.
+\end{enumerate}
+
+%%=============================================================================
+\section{Open Research Questions}
+%%=============================================================================
+
+\begin{itemize}[leftmargin=1.5em]
+  \item \textbf{Semantic change-graph for JIT-DP.} Most SOTA (DeepJIT, CC2Vec,
+        BiCC-BERT) encodes changes as flat sequences. A CPG-grounded delta graph
+        for JIT-DP is largely unexplored.
+  \item \textbf{Cross-scale message passing.} Fusing statement-level CPG
+        subgraphs with project/author/issue/temporal KG nodes in one heterogeneous
+        graph via message passing is an open design question.
+  \item \textbf{Inter-procedural change effects.} Commit edits method A, defect
+        surfaces in caller B. SDG-based propagation of change effects is rarely
+        modelled at commit level.
+  \item \textbf{Dynamic features without trace replay.} Can abstract
+        interpretation approximate execution-trace features cheaply?
+  \item \textbf{Review-comment-guided prediction.} Predicting which changed lines
+        will receive critical review comments before review is a novel JIT framing.
+  \item \textbf{Temporal decay of semantic features.} Time-aware GNNs combining
+        temporal KG nodes with code subgraph features.
+  \item \textbf{Exception-flow defect prediction.} Apache-project exception
+        mishandling linked to ISSUE nodes mentioning specific exception types.
+\end{itemize}
+
+%%=============================================================================
+\section*{References}
+%%=============================================================================
+
+\begin{enumerate}[leftmargin=1.5em, label={[\arabic*]}]
+  \item F. Yamaguchi et al., ``Modeling and Discovering Vulnerabilities with Code
+        Property Graphs,'' \textit{IEEE S\&P}, 2014. \url{https://joern.io}
+  \item Y. Zhou et al., ``Devign,'' \textit{NeurIPS}, 2019.
+  \item S. Wang et al., ``GraphSPD,'' \textit{IEEE S\&P}, 2023.
+        \url{https://csis.gmu.edu/ksun/publications/SP23_GraphSPD.pdf}
+  \item Z. Ni et al., ``BiCC-BERT,'' \textit{JSS}, 2024.
+        \url{https://arxiv.org/pdf/2410.12107}
+  \item C. Cummins et al., ``ProGraML,'' \textit{ICML}, 2021.
+        \url{https://arxiv.org/abs/2003.10536}
+  \item J.-R. Falleri et al., ``GumTree,'' \textit{ASE}, 2014;
+        redesigned \textit{ICSE}, 2024.
+        \url{https://dl.acm.org/doi/10.1145/3597503.3639148}
+  \item B. Fluri et al., ``ChangeDistiller,'' \textit{IEEE TSE}, 2007.
+  \item Z. Ni et al., ``Heterogeneous Graph for Bug-Fixing Root Cause,''
+        2025. \url{https://arxiv.org/pdf/2505.01022}
+  \item Z. Ni et al., ``JIT Defect Localisation via Code Graph,'' \textit{ICPC},
+        2024.
+  \item D. Guo et al., ``GraphCodeBERT,'' \textit{ICLR}, 2021.
+  \item T. Hoang et al., ``CC2Vec,'' \textit{ICSE}, 2020.
+  \item H. Ni et al., ``DeepJIT,'' \textit{MSR}, 2019.
+  \item Ferrante et al., ``PDG,'' \textit{ACM TOPLAS}, 1987.
+  \item Horwitz et al., ``SDG,'' \textit{ACM TOPLAS}, 1990.
+  \item Cousot \& Cousot, ``Abstract Interpretation,'' \textit{POPL}, 1977.
+  \item S. Chidamber, C. Kemerer, ``CK Metrics,'' \textit{IEEE TSE}, 1994.
+  \item ``Fault Localization with Code Coverage Representation Learning,''
+        \textit{ICSE}, 2021.
+        \url{https://dl.acm.org/doi/abs/10.1109/ICSE43902.2021.00067}
+  \item ``Combining Static and Dynamic Symbolic Traces,'' \textit{ICSE}, 2024.
+        \url{https://dl.acm.org/doi/10.1145/3597503.3639212}
+  \item ``Survey of Source Code Representations for ML Cybersecurity Tasks,''
+        \textit{ACM CSUR}, 2024.
+        \url{https://arxiv.org/pdf/2403.10646}
+  \item ``Deep Learning for Code Intelligence,'' \textit{ACM CSUR}, 2024.
+        \url{https://arxiv.org/abs/2401.00288}
+  \item ``TokDrift,'' 2024. \url{https://arxiv.org/pdf/2510.14972}
+  \item S. Dasgupta et al., ``IR2Vec,'' \textit{ACM TACO}, 2020.
+        \url{https://dl.acm.org/doi/fullHtml/10.1145/3418463}
+\end{enumerate}
+
+\end{document}
