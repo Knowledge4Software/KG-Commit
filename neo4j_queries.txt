@@ -1,0 +1,550 @@
+================================================================================
+  KG-Commit  —  Useful Neo4j Cypher Queries
+  Graph: apache/groovy  |  BASE_COMMIT: 408b29851d7b  |  13,122 commits
+================================================================================
+
+────────────────────────────────────────────────────────────────────────────────
+ SECTION 1 — GRAPH OVERVIEW
+────────────────────────────────────────────────────────────────────────────────
+
+[1.1] Count every node by label
+  Shows how many nodes of each type exist in the whole graph.
+
+  MATCH (n)
+  RETURN labels(n)[0] AS label, count(n) AS total
+  ORDER BY total DESC;
+
+────────────────────────────────────────────────────────────────────────────────
+
+[1.2] Count every relationship by type
+  Shows how many edges of each kind exist (ADDED, MODIFIED, AST_CHILD, etc.).
+
+  MATCH ()-[r]->()
+  RETURN type(r) AS relationship, count(r) AS total
+  ORDER BY total DESC;
+
+────────────────────────────────────────────────────────────────────────────────
+
+[1.3] Quick whole-graph sample (good starting visual)
+  Returns a mixed subgraph — useful for a first look in Neo4j Browser.
+
+  MATCH (n)-[r]->(m)
+  RETURN n, r, m
+  LIMIT 80;
+
+────────────────────────────────────────────────────────────────────────────────
+ SECTION 2 — COMMITS & DEVELOPERS
+────────────────────────────────────────────────────────────────────────────────
+
+[2.1] Most active developers (by commit count)
+  Ranks developers by how many commits they authored.
+
+  MATCH (d:Developer)<-[:AUTHORED_BY]-(c:Commit)
+  RETURN d.id AS developer, count(c) AS commits
+  ORDER BY commits DESC
+  LIMIT 20;
+
+────────────────────────────────────────────────────────────────────────────────
+
+[2.2] Commits that fix issues (with the issue they fix)
+  Shows which commits are linked to issue references.
+
+  MATCH (c:Commit)-[:FIXES_ISSUE]->(i:Issue)
+  RETURN c.id AS commit, c.message AS message, i.id AS issue
+  LIMIT 25;
+
+────────────────────────────────────────────────────────────────────────────────
+
+[2.3] Full commit context: developer → commit → files changed
+  Shows who made a commit and which files it touched.
+
+  MATCH (d:Developer)<-[:AUTHORED_BY]-(c:Commit)-[rel]->(f:File)
+  WHERE type(rel) IN ['ADDED','MODIFIED','DELETED','RENAMED_TO']
+  RETURN d.id AS developer, c.id AS commit,
+         type(rel) AS change_type, f.id AS file
+  LIMIT 40;
+
+────────────────────────────────────────────────────────────────────────────────
+
+[2.4] Developer → commit → issue (who fixed what)
+  Traces a developer through their commits to the issues those commits fixed.
+
+  MATCH (d:Developer)<-[:AUTHORED_BY]-(c:Commit)-[:FIXES_ISSUE]->(i:Issue)
+  RETURN d.id AS developer, count(DISTINCT i) AS issues_fixed
+  ORDER BY issues_fixed DESC
+  LIMIT 15;
+
+────────────────────────────────────────────────────────────────────────────────
+ SECTION 3 — FILES
+────────────────────────────────────────────────────────────────────────────────
+
+[3.1] Most frequently modified files
+  Ranks files by how many commits touched them (hot spots in the codebase).
+
+  MATCH (c:Commit)-[:MODIFIED]->(f:File)
+  RETURN f.id AS file, count(c) AS times_modified
+  ORDER BY times_modified DESC
+  LIMIT 20;
+
+────────────────────────────────────────────────────────────────────────────────
+
+[3.2] Files that were added in the very first commit (BASE_COMMIT)
+  These are the 120 files that have AST subgraphs attached.
+
+  MATCH (c:Commit {id: '408b29851d7bbe4d343340832297e4be7e0c5578'})-[:ADDED]->(f:File)
+  RETURN f.id AS file
+  ORDER BY file;
+
+────────────────────────────────────────────────────────────────────────────────
+
+[3.3] Which files have an AST attached?
+  Only the 120 base-snapshot files have HAS_AST edges.
+
+  MATCH (f:File)-[:HAS_AST]->(r:ASTNode)
+  RETURN f.id AS file, r.id AS ast_root
+  ORDER BY file;
+
+────────────────────────────────────────────────────────────────────────────────
+
+[3.4] Files that were deleted at some point
+  Shows all files that were ever deleted in the history.
+
+  MATCH (c:Commit)-[:DELETED]->(f:File)
+  RETURN f.id AS file, count(c) AS times_deleted
+  ORDER BY times_deleted DESC
+  LIMIT 20;
+
+────────────────────────────────────────────────────────────────────────────────
+ SECTION 4 — AST STRUCTURE
+────────────────────────────────────────────────────────────────────────────────
+
+[4.1] AST node count per file (largest files first)
+  Shows how many AST nodes each of the 120 base-snapshot files has in the graph.
+
+  MATCH (a:ASTNode)
+  RETURN a.file AS file, count(a) AS ast_nodes
+  ORDER BY ast_nodes DESC;
+
+────────────────────────────────────────────────────────────────────────────────
+
+[4.2] AST node breakdown by group (leaf, expression, declaration, etc.)
+  Shows the distribution of high-level AST categories across all 120 files.
+
+  MATCH (a:ASTNode)
+  RETURN a.group AS group, count(a) AS total
+  ORDER BY total DESC;
+
+────────────────────────────────────────────────────────────────────────────────
+
+[4.3] AST node breakdown by exact type (fine-grained)
+  Shows count of each specific javalang node type in the whole graph.
+
+  MATCH (a:ASTNode)
+  RETURN a.ast_type AS ast_type, count(a) AS total
+  ORDER BY total DESC
+  LIMIT 30;
+
+────────────────────────────────────────────────────────────────────────────────
+
+[4.4] Visualise the full AST for one small file  ← good for Neo4j Browser graph view
+  Shows File → AST root → all descendants for Bitwise.java (only 7 nodes).
+
+  MATCH p = (f:File)-[:HAS_AST]->(root:ASTNode)-[:AST_CHILD*]->(child:ASTNode)
+  WHERE f.id = 'src/main/groovy/lang/Bitwise.java'
+  RETURN p;
+
+────────────────────────────────────────────────────────────────────────────────
+
+[4.5] Visualise AST for a medium file (3 levels deep)
+  Shows 3 levels of the AST for Groovyc.java (923 nodes — don't go deeper).
+
+  MATCH p = (f:File)-[:HAS_AST]->(root:ASTNode)-[:AST_CHILD*..3]->(child:ASTNode)
+  WHERE f.id = 'src/main/org/codehaus/groovy/ant/Groovyc.java'
+  RETURN p;
+
+────────────────────────────────────────────────────────────────────────────────
+
+[4.6] Deepest AST nodes (highest depth value) across all files
+  Finds the leaf nodes that are furthest from the root — reveals complex nesting.
+
+  MATCH (a:ASTNode)
+  WHERE a.is_leaf = true
+  RETURN a.file AS file, a.ast_type AS type, a.depth AS depth, a.value AS value
+  ORDER BY depth DESC
+  LIMIT 20;
+
+────────────────────────────────────────────────────────────────────────────────
+
+[4.7] Average AST depth per file
+  Ranks files by average depth of their AST — proxy for code complexity.
+
+  MATCH (a:ASTNode)
+  RETURN a.file AS file, avg(a.depth) AS avg_depth, max(a.depth) AS max_depth
+  ORDER BY avg_depth DESC;
+
+────────────────────────────────────────────────────────────────────────────────
+ SECTION 5 — CROSS-ENTITY (FILE + AST + COMMITS)
+────────────────────────────────────────────────────────────────────────────────
+
+[5.1] Commits that added a file which has an AST + who authored it
+  Links commit history to the AST-bearing files (the base-snapshot files).
+
+  MATCH (d:Developer)<-[:AUTHORED_BY]-(c:Commit)-[:ADDED]->(f:File)-[:HAS_AST]->(r:ASTNode)
+  RETURN d.id AS developer, c.id AS commit, f.id AS file
+  ORDER BY file
+  LIMIT 30;
+
+────────────────────────────────────────────────────────────────────────────────
+
+[5.2] Visualise a Commit → File → AST root path  ← good graph visual
+  Shows the chain: commit node → file node → AST root node.
+
+  MATCH p = (c:Commit)-[:ADDED]->(f:File)-[:HAS_AST]->(r:ASTNode)
+  RETURN p
+  LIMIT 20;
+
+────────────────────────────────────────────────────────────────────────────────
+
+[5.3] Files modified most AND that have an AST (complexity hot spots)
+  Cross-references churn (times modified) with AST size — the most changed
+  AND most complex files are the riskiest.
+
+  MATCH (c:Commit)-[:MODIFIED]->(f:File)-[:HAS_AST]->(r:ASTNode)
+  WITH f, count(DISTINCT c) AS churn
+  MATCH (a:ASTNode {file: f.id})
+  RETURN f.id AS file, churn, count(a) AS ast_nodes
+  ORDER BY churn DESC
+  LIMIT 20;
+
+────────────────────────────────────────────────────────────────────────────────
+
+[5.4] Developer contribution to complex files (AST size as complexity proxy)
+  Shows which developers worked on the largest AST files.
+
+  MATCH (d:Developer)<-[:AUTHORED_BY]-(c:Commit)-[:MODIFIED]->(f:File)
+  MATCH (a:ASTNode {file: f.id})
+  WITH d, f, count(DISTINCT c) AS commits_on_file, count(a) AS ast_size
+  RETURN d.id AS developer, f.id AS file, commits_on_file, ast_size
+  ORDER BY ast_size DESC
+  LIMIT 25;
+
+────────────────────────────────────────────────────────────────────────────────
+ SECTION 6 — SPECIFIC LOOKUP HELPERS
+────────────────────────────────────────────────────────────────────────────────
+
+[6.1] Find a developer by partial name / email
+  Replace 'james' with any substring of the developer id.
+
+  MATCH (d:Developer)
+  WHERE toLower(d.id) CONTAINS 'james'
+  RETURN d;
+
+────────────────────────────────────────────────────────────────────────────────
+
+[6.2] Find all files in a specific package path
+  Replace 'runtime' with any path segment.
+
+  MATCH (f:File)
+  WHERE f.id CONTAINS 'runtime'
+  RETURN f.id AS file
+  ORDER BY file;
+
+────────────────────────────────────────────────────────────────────────────────
+
+[6.3] Find all MethodDeclaration nodes across all files
+  Retrieves all AST nodes of a specific type.
+
+  MATCH (a:ASTNode {ast_type: 'MethodDeclaration'})
+  RETURN a.file AS file, a.id AS node_id, a.depth AS depth
+  ORDER BY file, depth;
+
+================================================================================
+
+────────────────────────────────────────────────────────────────────────────────
+ SECTION 7 — WHOLE-GRAPH VISUALIZATIONS  (paste in Neo4j Browser → graph view)
+ These queries return visual subgraphs — switch to the Graph tab in Browser,
+ not Table. Start with the LIMIT versions; raise the limit only if the graph
+ is not too dense to read.
+────────────────────────────────────────────────────────────────────────────────
+
+[7.1] The entire schema in one picture
+  Shows one representative node of every label connected by one edge of every
+  relationship type — a "map" of the graph schema without flooding the screen.
+
+  MATCH (n)-[r]->(m)
+  WITH labels(n)[0] AS fl, type(r) AS rel, labels(m)[0] AS tl, n, r, m,
+       rand() AS rnd
+  ORDER BY fl, rel, tl, rnd
+  WITH fl, rel, tl, collect([n,r,m])[0] AS trio
+  RETURN trio[0] AS n, trio[1] AS r, trio[2] AS m;
+
+────────────────────────────────────────────────────────────────────────────────
+
+[7.2] Full commit history chain: Branch → Commits (timeline spine)
+  Visualises the Branch → Commit links using INSIDE_BRANCH edges.
+  Shows the backbone of the whole project history.
+
+  MATCH p = (b:Branch)-[:INSIDE_BRANCH]->(c:Commit)
+  RETURN p
+  LIMIT 60;
+
+────────────────────────────────────────────────────────────────────────────────
+
+[7.3] Developer universe: all developers and the commits they authored
+  Shows every developer node linked to their commits — densely connected
+  nodes are the most active contributors.
+
+  MATCH p = (d:Developer)<-[:AUTHORED_BY]-(c:Commit)
+  RETURN p
+  LIMIT 100;
+
+────────────────────────────────────────────────────────────────────────────────
+
+[7.4] Issue network: commits that fix issues
+  Shows the web of Commit → Issue links. Each cluster is a commit
+  that referenced one or more issue IDs in its message.
+
+  MATCH p = (c:Commit)-[:FIXES_ISSUE]->(i:Issue)
+  RETURN p
+  LIMIT 80;
+
+────────────────────────────────────────────────────────────────────────────────
+
+[7.5] Base snapshot: File nodes + their AST roots (star view)
+  Shows all 120 base-snapshot File nodes each connected to their
+  AST root node via HAS_AST. Good for confirming full coverage.
+
+  MATCH p = (f:File)-[:HAS_AST]->(r:ASTNode)
+  RETURN p;
+
+────────────────────────────────────────────────────────────────────────────────
+
+[7.6] Full AST tree for the smallest file (Bitwise.java — 7 nodes)
+  The complete AST from root to every leaf. Safe to expand fully
+  because the file is tiny.
+
+  MATCH p = (f:File)-[:HAS_AST]->(root:ASTNode)-[:AST_CHILD*]->(child:ASTNode)
+  WHERE f.id = 'src/main/groovy/lang/Bitwise.java'
+  RETURN p;
+
+────────────────────────────────────────────────────────────────────────────────
+
+[7.7] A file's full lifecycle — every commit that ever touched it
+  Shows all commits that ADDED / MODIFIED / DELETED a specific file,
+  plus their authors. Change the file id to any file you like.
+
+  MATCH p = (d:Developer)<-[:AUTHORED_BY]-(c:Commit)-[rel]->(f:File)
+  WHERE f.id = 'src/main/org/codehaus/groovy/runtime/Invoker.java'
+    AND type(rel) IN ['ADDED','MODIFIED','DELETED','RENAMED_FROM','RENAMED_TO']
+  RETURN p
+  LIMIT 80;
+
+────────────────────────────────────────────────────────────────────────────────
+
+[7.8] A developer's full impact: commits + all files they changed
+  Replace 'guillaume' with any substring matching a developer id.
+  Shows every file one developer has ever touched across the whole history.
+
+  MATCH p = (d:Developer)<-[:AUTHORED_BY]-(c:Commit)-[rel]->(f:File)
+  WHERE toLower(d.id) CONTAINS 'guillaume'
+    AND type(rel) IN ['ADDED','MODIFIED','DELETED']
+  RETURN p
+  LIMIT 100;
+
+────────────────────────────────────────────────────────────────────────────────
+
+[7.9] Commit → File → AST: base files with their commit history
+  Connects the initial ADDED commit, all later MODIFIED commits, and the
+  AST root — structure and evolution of the base-snapshot files in one view.
+
+  MATCH p1 = (c1:Commit)-[:ADDED]->(f:File)-[:HAS_AST]->(r:ASTNode)
+  MATCH p2 = (c2:Commit)-[:MODIFIED]->(f)
+  RETURN p1, p2
+  LIMIT 60;
+
+────────────────────────────────────────────────────────────────────────────────
+
+[7.10] Issue → Commit → Developer → File (end-to-end bug-fix chain)
+  Traces a bug report all the way: which issue, which commit fixed it,
+  who wrote that commit, and which files were changed in the fix.
+
+  MATCH p1 = (i:Issue)<-[:FIXES_ISSUE]-(c:Commit)-[:AUTHORED_BY]->(d:Developer)
+  MATCH p2 = (c)-[rel]->(f:File)
+  WHERE type(rel) IN ['MODIFIED','ADDED']
+  RETURN p1, p2
+  LIMIT 50;
+
+────────────────────────────────────────────────────────────────────────────────
+
+[7.11] Most-churned base file + its AST (complexity meets churn)
+  Finds the single most-modified file that also has an AST, then shows
+  its AST tree (2 levels deep) alongside every commit that touched it.
+  Reveals the riskiest file in the codebase.
+
+  MATCH (c:Commit)-[:MODIFIED]->(f:File)-[:HAS_AST]->(:ASTNode)
+  WITH f, count(c) AS churn ORDER BY churn DESC LIMIT 1
+  MATCH p1 = (c2:Commit)-[:MODIFIED]->(f)
+  MATCH p2 = (f)-[:HAS_AST]->(r:ASTNode)-[:AST_CHILD*..2]->(child:ASTNode)
+  RETURN p1, p2;
+
+────────────────────────────────────────────────────────────────────────────────
+
+[7.12] Complete neighbourhood of one commit (all connected entities)
+  Pick any commit id and see everything connected to it: developer,
+  branch, issues fixed, and every file it touched.
+
+  MATCH (c:Commit {id: '408b29851d7bbe4d343340832297e4be7e0c5578'})
+  MATCH p = (c)-[r]-(neighbor)
+  RETURN p;
+
+────────────────────────────────────────────────────────────────────────────────
+
+[7.13] Two-hop subgraph from Project node (the full graph anchor)
+  The Project node is the single root everything belongs to.
+  Two hops out gives a high-level overview of the entire knowledge graph.
+
+  MATCH p = (proj:Project)-[*1..2]-(neighbor)
+  RETURN p
+  LIMIT 120;
+
+================================================================================
+
+────────────────────────────────────────────────────────────────────────────────
+ SECTION 8 — BASE VERSION GRAPH  (BASE_COMMIT = 408b29851d7bbe4d343340832297e4be7e0c5578)
+ These queries focus exclusively on the snapshot of apache/groovy at commit #30
+ (the first Java commit), which is the only version with AST subgraphs attached.
+ Entities in this snapshot: 1 Project, 1 Branch, 1 Commit, 1 Developer,
+ 120 Files, 120 AST roots, 44,701 ASTNodes, 44,581 AST_CHILD edges.
+────────────────────────────────────────────────────────────────────────────────
+
+[8.1] ★ MASTER VISUALIZATION — every structural node of the base version
+  Shows the complete skeleton: Project → Branch → Commit → Developer,
+  Commit → all 120 File nodes, each File → its AST root node.
+  AST internals (AST_CHILD edges) are excluded to keep the graph readable.
+  This is the recommended starting point for the whole-base-version view.
+
+  MATCH (c:Commit {id: '408b29851d7bbe4d343340832297e4be7e0c5578'})
+  MATCH p1 = (proj:Project)<-[:BELONGS_TO]-(c)
+  MATCH p2 = (branch:Branch)<-[:INSIDE_BRANCH]-(c)
+  MATCH p3 = (c)-[:AUTHORED_BY]->(d:Developer)
+  MATCH p4 = (c)-[:ADDED]->(f:File)
+  MATCH p5 = (f)-[:HAS_AST]->(r:ASTNode)
+  RETURN p1, p2, p3, p4, p5;
+
+────────────────────────────────────────────────────────────────────────────────
+
+[8.2] Base commit + files only (no AST) — fastest overview
+  Just the commit node connected to all 120 files it added.
+  Use this to find a specific file before drilling into its AST.
+
+  MATCH p = (c:Commit {id: '408b29851d7bbe4d343340832297e4be7e0c5578'})-[:ADDED]->(f:File)
+  RETURN p;
+
+────────────────────────────────────────────────────────────────────────────────
+
+[8.3] Base version: files grouped by package (colour by path prefix)
+  Returns each file's path split into package prefix + filename so you can
+  see which packages existed at the base snapshot. Table view is clearest.
+
+  MATCH (c:Commit {id: '408b29851d7bbe4d343340832297e4be7e0c5578'})-[:ADDED]->(f:File)
+  WITH f,
+       split(f.id, '/') AS parts
+  RETURN f.id AS file,
+         reduce(pkg='', i IN range(0, size(parts)-2) | pkg + '/' + parts[i]) AS package,
+         parts[-1] AS filename
+  ORDER BY package, filename;
+
+────────────────────────────────────────────────────────────────────────────────
+
+[8.4] AST roots + 1 level of children for every base file
+  One hop into the AST from each root — shows the top-level declarations
+  (classes, imports, package) directly under each file's root node.
+
+  MATCH p = (f:File)-[:HAS_AST]->(root:ASTNode)-[:AST_CHILD]->(child:ASTNode)
+  RETURN p
+  LIMIT 200;
+
+────────────────────────────────────────────────────────────────────────────────
+
+[8.5] Full AST for all small files (≤ 50 nodes) — safe to visualize completely
+  Automatically selects only the files whose ASTs are small enough to render
+  without overwhelming the browser. Typically 10-15 files.
+
+  MATCH (a:ASTNode)
+  WITH a.file AS file, count(a) AS n
+  WHERE n <= 50
+  MATCH p = (f:File {id: file})-[:HAS_AST]->(root:ASTNode)-[:AST_CHILD*]->(child:ASTNode)
+  RETURN p;
+
+────────────────────────────────────────────────────────────────────────────────
+
+[8.6] Full AST for a single file — pick any file by name
+  Replace the file id with any file from the base snapshot.
+  Safe for files up to ~300 nodes; use [8.7] for larger ones.
+
+  MATCH p = (f:File)-[:HAS_AST]->(root:ASTNode)-[:AST_CHILD*]->(child:ASTNode)
+  WHERE f.id = 'src/main/org/codehaus/groovy/ast/MethodNode.java'
+  RETURN p;
+
+────────────────────────────────────────────────────────────────────────────────
+
+[8.7] Controlled AST depth for large files (adjust depth as needed)
+  For files with 300+ nodes, limit traversal depth to keep the graph clean.
+  depth=2 shows class/method level; depth=3 adds statement level; depth=4+ gets crowded.
+
+  MATCH p = (f:File)-[:HAS_AST]->(root:ASTNode)-[:AST_CHILD*..3]->(child:ASTNode)
+  WHERE f.id = 'src/main/org/codehaus/groovy/syntax/parser/Parser.java'
+  RETURN p;
+
+────────────────────────────────────────────────────────────────────────────────
+
+[8.8] AST leaf nodes only for a file (the terminal values)
+  Shows only the leaf nodes — identifiers, literals, type names — without
+  the internal tree structure. Good for seeing what names appear in a file.
+
+  MATCH (f:File)-[:HAS_AST]->(root:ASTNode)-[:AST_CHILD*]->(leaf:ASTNode)
+  WHERE f.id = 'src/main/org/codehaus/groovy/ast/MethodNode.java'
+    AND leaf.is_leaf = true
+  RETURN leaf.ast_type AS type, leaf.value AS value, leaf.depth AS depth
+  ORDER BY depth, type;
+
+────────────────────────────────────────────────────────────────────────────────
+
+[8.9] AST declaration nodes across all base files (class/method/field structure)
+  Shows every declaration-group node across the entire base snapshot.
+  This is the "skeleton" of the codebase — all classes, methods, fields.
+
+  MATCH (f:File)-[:HAS_AST]->(root:ASTNode)-[:AST_CHILD*]->(d:ASTNode)
+  WHERE d.group = 'declaration'
+  RETURN f.id AS file, d.ast_type AS declaration_type,
+         d.depth AS depth, count(d) AS count
+  ORDER BY file, depth;
+
+────────────────────────────────────────────────────────────────────────────────
+
+[8.10] Base version: side-by-side AST comparison between two files
+  Shows the ASTs of two files at depth 3 in the same graph view so you can
+  visually compare their structure. Good for comparing a class and its test.
+
+  MATCH p1 = (f1:File)-[:HAS_AST]->(r1:ASTNode)-[:AST_CHILD*..3]->(c1:ASTNode)
+  WHERE f1.id = 'src/main/org/codehaus/groovy/ast/MethodNode.java'
+  MATCH p2 = (f2:File)-[:HAS_AST]->(r2:ASTNode)-[:AST_CHILD*..3]->(c2:ASTNode)
+  WHERE f2.id = 'src/test/org/codehaus/groovy/classgen/MethodTest.java'
+  RETURN p1, p2;
+
+────────────────────────────────────────────────────────────────────────────────
+
+[8.11] ★ MASTER + AST internals — THE complete base version graph
+  WARNING: returns ~44,700 nodes and ~44,600 edges. Neo4j Browser will
+  struggle — use only with "Connect result nodes" turned OFF in Browser
+  settings, or export via APOC instead. Included for completeness.
+
+  MATCH (c:Commit {id: '408b29851d7bbe4d343340832297e4be7e0c5578'})
+  MATCH p1 = (proj:Project)<-[:BELONGS_TO]-(c)
+  MATCH p2 = (branch:Branch)<-[:INSIDE_BRANCH]-(c)
+  MATCH p3 = (c)-[:AUTHORED_BY]->(d:Developer)
+  MATCH p4 = (c)-[:ADDED]->(f:File)-[:HAS_AST]->(root:ASTNode)
+  MATCH p5 = (root)-[:AST_CHILD*]->(child:ASTNode)
+  RETURN p1, p2, p3, p4, p5;
+
+================================================================================
