@@ -548,3 +548,86 @@
   RETURN p1, p2, p3, p4, p5;
 
 ================================================================================
+ SECTION 9 — AST DIFF / CHANGE MODELING  (ast_diff_experiment.py output)
+================================================================================
+
+Schema:  (:Commit)-[:HAS_AST_DIFF]->(:ASTDiff)-[:EDIT]->(:ASTEdit)
+         (:File)-[:DIFFED_AT]->(:ASTDiff)
+ASTDiff  {id, commit_id, file, n_insert, n_delete, n_update, n_move, total}
+ASTEdit  {id, diff_id, action, node_type, node_label, new_label, parent_type, position}
+
+[9.1] Count ASTDiff and ASTEdit nodes
+
+  MATCH (d:ASTDiff) RETURN count(d) AS diffs;
+  MATCH (e:ASTEdit) RETURN count(e) AS edits;
+
+[9.2] Summary table: edits per commit-file pair (sorted by total)
+
+  MATCH (d:ASTDiff)
+  RETURN d.commit_id AS commit, d.file AS file,
+         d.n_insert AS ins, d.n_delete AS del,
+         d.n_update AS upd, d.n_move AS mov, d.total AS total
+  ORDER BY d.total DESC;
+
+[9.3] Which AST node types are most commonly inserted?
+
+  MATCH (e:ASTEdit {action: 'insert'})
+  RETURN e.node_type AS type, count(*) AS n
+  ORDER BY n DESC LIMIT 20;
+
+[9.4] Which AST node types are most commonly deleted?
+
+  MATCH (e:ASTEdit {action: 'delete'})
+  RETURN e.node_type AS type, count(*) AS n
+  ORDER BY n DESC LIMIT 20;
+
+[9.5] Which node types are updated (with old and new labels)?
+
+  MATCH (e:ASTEdit {action: 'update'})
+  RETURN e.node_type AS type, e.node_label AS old_label, e.new_label AS new_label
+  LIMIT 30;
+
+[9.6] Show all edits for one specific commit-file diff
+
+  MATCH (d:ASTDiff {id: '3fa835bc::src/main/org/codehaus/groovy/ant/Groovyc.java'})
+        -[:EDIT]->(e:ASTEdit)
+  RETURN e.action, e.node_type, e.node_label, e.parent_type, e.position
+  ORDER BY e.position;
+
+[9.7] Full path: Commit -> ASTDiff -> ASTEdit (first 3 ASTEdits per diff)
+
+  MATCH p = (c:Commit)-[:HAS_AST_DIFF]->(d:ASTDiff)-[:EDIT]->(e:ASTEdit)
+  WITH c, d, collect(p)[..3] AS paths
+  UNWIND paths AS p
+  RETURN p;
+
+[9.8] File evolution: all diffs on the same file across commits
+
+  MATCH (f:File {id: 'src/main/org/codehaus/groovy/ant/Groovyc.java'})
+        -[:DIFFED_AT]->(d:ASTDiff)
+  RETURN d.commit_id AS commit, d.n_insert AS ins, d.n_delete AS del,
+         d.n_update AS upd, d.n_move AS mov, d.total AS total
+  ORDER BY d.commit_id;
+
+[9.9] What parent node types surround the most inserts?
+
+  MATCH (e:ASTEdit {action: 'insert'})
+  WHERE e.parent_type <> ''
+  RETURN e.parent_type AS parent, count(*) AS n
+  ORDER BY n DESC LIMIT 15;
+
+[9.10] Connect commit author to the type of AST edits they make
+
+  MATCH (c:Commit)-[:AUTHORED_BY]->(dev:Developer)
+  MATCH (c)-[:HAS_AST_DIFF]->(d:ASTDiff)-[:EDIT]->(e:ASTEdit)
+  RETURN dev.email AS author, e.action AS action, count(*) AS n
+  ORDER BY n DESC LIMIT 20;
+
+[9.11] Visualise one commit's full diff graph (commit + diff + edits)
+
+  MATCH p1 = (c:Commit)-[:HAS_AST_DIFF]->(d:ASTDiff)
+  MATCH p2 = (d)-[:EDIT]->(e:ASTEdit)
+  WHERE d.file = 'src/main/org/codehaus/groovy/ant/Groovyc.java'
+  RETURN p1, p2 LIMIT 100;
+
+================================================================================
