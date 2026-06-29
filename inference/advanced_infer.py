@@ -28,7 +28,8 @@ import numpy as np, pandas as pd
 from pathlib import Path
 from collections import defaultdict
 import scipy.sparse as sp
-from neo4j import GraphDatabase
+# neo4j is imported lazily inside load_kg() so modules that only reuse the pure
+# helpers (or cached data) can be imported without a Neo4j install.
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import HistGradientBoostingClassifier
@@ -45,6 +46,7 @@ PPR_ITERS=60
 
 # ── pull everything we need from the KG in a few passes ──────────────────────
 def load_kg():
+    from neo4j import GraphDatabase
     d=GraphDatabase.driver(NEO4J_URI,auth=NEO4J_AUTH)
     def q(cypher):                       # execute_read auto-retries transient errors
         with d.session(default_access_mode="READ") as s:

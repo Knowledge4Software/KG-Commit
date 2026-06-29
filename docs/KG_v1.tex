@@ -15,6 +15,9 @@
 \usepackage{enumitem}
 \usepackage{caption}
 \usepackage{listings}
+\usepackage{graphicx}
+\graphicspath{{figures/}}
+\usepackage{float}
 \usepackage[hidelinks]{hyperref}
 
 \definecolor{kgblue}{HTML}{1F77B4}
@@ -460,6 +463,15 @@ footprint is $\approx$5.6\,GB (budget $\approx$10\,GB for headroom).
 than benign ones: on average $\approx$860 delta edges per buggy commit versus
 $\approx$299 per benign commit (and $\approx$196 vs.\ $\approx$70 lines added).
 This separation is the basic reason the graph is useful for the task.
+Figure~\ref{fig:signal} shows both this size separation and the strong
+\emph{temporal drift} of the bug rate across 2003--2019 --- the latter being why
+a time-aware online protocol (\S\ref{sec:inference}) is essential.
+
+\begin{figure}[H]\centering
+\includegraphics[width=.92\linewidth]{bug_signal.png}
+\caption{Left: AST-change size (log delta edges) for benign vs.\ buggy commits.
+Right: yearly bug rate, showing pronounced concept drift.}\label{fig:signal}
+\end{figure}
 
 % ===========================================================================
 \section{Audit and Data Quality of the Finalized KG}\label{sec:audit}
@@ -666,6 +678,13 @@ DistMult               & 0.757 & 0.487 & 0.529 & 0.343\\
 \end{tabular}
 \end{table}
 
+\begin{figure}[H]\centering
+\includegraphics[width=\linewidth]{online_curves.png}
+\caption{Online (blocked) ROC and precision--recall curves. Fusion (top legend
+entry) dominates across the whole operating range; every KG-native method sits
+above the JIT-metrics baseline on PR.}\label{fig:curves}
+\end{figure}
+
 \subsection{Interpretation}
 \begin{itemize}[nosep]
   \item \textbf{Fusion is best by a wide margin}, and the gap is largest in the
@@ -761,6 +780,95 @@ This \emph{corrects} an earlier, non-controlled comparison (which compared
 different test windows and overstated our advantage). The implication is item~1
 of \S\ref{sec:next}: add commit-text features to the fusion and/or move to a GNN
 that exploits the AST neighbourhood the tabular methods flatten away.
+
+\subsection{Fully-online (prequential) evaluation and operating-point F1}\label{sec:onlinejit}
+The strictest realisation of the JIT protocol processes commits \emph{one at a
+time}: as each commit arrives we (1)~\textbf{predict} it from the KG/history
+known so far, (2)~\textbf{evaluate} by revealing its label and updating running
+metrics, (3)~\textbf{grow} the KG state (its relational/graph evidence is added),
+and (4)~\textbf{learn} (incremental \code{partial\_fit} for linear models,
+periodic expanding-window retraining for trees/embeddings). The engine
+(\texttt{inference/online\_jit.py}) runs the within-project baselines \emph{and}
+the KG-native methods in this same stream, so they are compared under one
+identical online protocol (notebook
+\texttt{experiments/notebooks/online\_jit\_evaluation.ipynb}).
+
+\paragraph{Operating-point F1.} Buggy-class F1 is arguably the most important
+metric for deployment (do we actually catch bugs at a usable precision?), but F1
+at a fixed $0.5$ threshold is unfair to uncalibrated scores. We therefore report
+\code{F1\_online}: the buggy-F1 with the decision threshold \emph{tuned online}
+on past predictions only (re-tuned every $150$ commits). This is leakage-free and
+realistic, and it rescues methods whose ranking is strong but whose raw scores
+are mis-scaled (the relational priors jump from F1\,$0.05$ at $0.5$ to
+\code{F1\_online}\,$0.48$).
+
+\begin{table}[H]\centering\small
+\caption{Fully-online prequential results (whole stream; warm-up $30\%$, scored
+$\approx$5{,}640 commits, stream bug rate $0.245$). Sorted by online
+operating-point F1.}\label{tab:jit}
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+\textbf{Method} & \textbf{F1\_online} & \textbf{F1@.5} & \textbf{PR-AUC} & \textbf{ROC}\\
+\midrule
+\multicolumn{5}{@{}l}{\textit{Within-project baselines}}\\
+LR / JIT metrics            & 0.464 & 0.467 & 0.348 & 0.671\\
+RandomForest / JIT metrics  & 0.478 & 0.240 & 0.478 & 0.723\\
+GradBoost / JIT metrics     & 0.481 & 0.445 & 0.469 & 0.711\\
+Naive prior bug-rate        & 0.391 & 0.000 & 0.223 & 0.468\\
+\midrule
+\multicolumn{5}{@{}l}{\textit{KG-native methods}}\\
+Relational priors (wvRN)    & 0.477 & 0.048 & 0.428 & 0.703\\
+Structural TF-IDF           & 0.490 & 0.486 & 0.420 & 0.719\\
+Personalized PageRank       & 0.511 & 0.512 & 0.383 & 0.727\\
+KG embedding (SVD/LSA)      & 0.479 & 0.460 & 0.427 & 0.690\\
+\textbf{Fusion (M+T+R+P)}   & \textbf{0.593} & \textbf{0.552} & \textbf{0.598} & \textbf{0.822}\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[H]\centering
+\includegraphics[width=\linewidth]{online_jit_compare.png}\\[3pt]
+\includegraphics[width=.80\linewidth]{jit_trajectories.png}
+\caption{Top: fully-online operating-point F1 (\code{F1\_online}) and PR-AUC
+(baselines orange, KG-native blue). Bottom: rolling PR-AUC \emph{as commits
+arrive} --- the Fusion (thick blue) stays on top throughout the stream.}\label{fig:jit}
+\end{figure}
+
+Under the strict per-commit protocol the \textbf{Fusion again leads on every
+metric, including the operating-point F1} (\code{F1\_online} $0.593$ vs.\ $0.481$
+for the best baseline), and the trajectory shows the lead is \emph{persistent}.
+
+\paragraph{Fusion feature ablation.} The Fusion combines four streams:
+\textbf{M} = JIT metrics, \textbf{T} = structural TF-IDF, \textbf{R} = relational
+priors, \textbf{P} = PPR score. We evaluate all $15$ non-empty subsets under the
+same online protocol (Figure~\ref{fig:abl}); the leave-one-out drop in
+\code{F1\_online} measures each feature's unique contribution.
+
+\begin{figure}[H]\centering
+\includegraphics[width=.60\linewidth]{ablation_combos.png}\\[3pt]
+\includegraphics[width=.84\linewidth]{ablation_importance.png}
+\caption{Top: all $15$ feature subsets ranked by online F1 (colour $=$ number of
+features). Bottom-left: each feature alone. Bottom-right: leave-one-out drop in
+\code{F1\_online} when a feature is removed from M+T+R+P (negative $=$ the feature
+slightly hurts).}\label{fig:abl}
+\end{figure}
+
+Findings (consistent across \code{F1\_online} and PR-AUC):
+\begin{itemize}[nosep]
+  \item \textbf{Relational priors (R) and structural TF-IDF (T) are the core.}
+        They are the strongest single features (\code{F1\_online} $0.52$ / $0.51$)
+        and have the largest leave-one-out drops ($-0.055$ and $-0.038$); together
+        (T+R) they already reach \code{F1\_online} $0.587$.
+  \item \textbf{JIT metrics (M) add a small positive boost}
+        (T+R\,$\to$\,M+T+R: $0.587\!\rightarrow\!0.604$).
+  \item \textbf{PPR (P) is redundant / marginally harmful}: removing it
+        \emph{improves} the result (leave-one-out $+0.003$), so the best subset is
+        \textbf{M+T+R} (\code{F1\_online} $0.604$, PR-AUC $0.608$), edging the full
+        four-feature fusion --- its graph-proximity signal is already captured by
+        the relational priors.
+\end{itemize}
+\textbf{Recommendation.} The Fusion's sweet spot is \textbf{M+T+R}; PPR can be
+dropped with no loss (a small gain) and lower cost.
 
 \paragraph{Reproducibility.} \texttt{python inference/run\_all.py} rebuilds all
 features, embeddings (cached under \texttt{outputs/emb\_*.npy}) and the results
