@@ -139,7 +139,8 @@ def main():
             tf_clf =lr(sparse=True).fit(Xh[past],y[past])
             fus_clf=lr(sparse=True).fit(fuse(past),y[past])
             svd=TruncatedSVD(n_components=min(SVD_DIM,C.shape[1]-1),random_state=0)
-            E=svd.fit_transform(C)
+            svd.fit(C[past])                 # leakage-free: SVD basis from PAST rows only
+            E=svd.transform(C)
             svd_clf=lr().fit(E[past],y[past])
         # ---- predict the block (past-only models) ----
         preds["O1_jit"][idx]=jit_clf.predict_proba(Xms[idx])[:,1]

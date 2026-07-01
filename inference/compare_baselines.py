@@ -69,7 +69,17 @@ def main():
     sc = StandardScaler().fit(np.hstack([Xm,Xp])[tr]); dns = sc.transform(np.hstack([Xm,Xp]))
     Xf = sp.hstack([sp.csr_matrix(dns), Xt, sp.csr_matrix(pp[:,None])]).tocsr()
     m = lr().fit(Xf[tr], y[tr]); p = m.predict_proba(Xf[te])[:,1]
-    rows.append(("Ours: FUSION", *evalp(y[te], p)))
+    rows.append(("Ours: FUSION (no text)", *evalp(y[te], p)))
+    # V2: commit-message TEXT (vocab fit on train only)
+    msgs = [str(commits[c].get("message","")) for c in cids]
+    tvec = TfidfVectorizer(ngram_range=(1,2), min_df=3, lowercase=True).fit([msgs[i] for i in tr])
+    Xtx = tvec.transform(msgs)
+    m = lr().fit(Xtx[tr], y[tr]); p = m.predict_proba(Xtx[te])[:,1]
+    rows.append(("Ours: Commit-text (V2)", *evalp(y[te], p)))
+    # V2: Fusion + text
+    Xft = sp.hstack([Xf, Xtx]).tocsr()
+    m = lr().fit(Xft[tr], y[tr]); p = m.predict_proba(Xft[te])[:,1]
+    rows.append(("Ours: FUSION+text (V2)", *evalp(y[te], p)))
 
     print(f"{'method':<28}{'ROC':>7}{'PR-AUC':>8}{'F1':>7}{'Prec':>7}{'Rec':>7}")
     print("-"*64)

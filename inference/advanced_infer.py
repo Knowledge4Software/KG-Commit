@@ -53,9 +53,10 @@ def load_kg():
             return s.execute_read(lambda tx: [r.data() for r in tx.run(cypher)])
     commits={}
     for r in q(f"""MATCH (c:Commit {{in_jit:true}})
-        RETURN c.id AS id, c.author_ts AS ts, c.buggy AS b,
+        RETURN c.id AS id, c.author_ts AS ts, c.buggy AS b, c.message AS msg,
                {", ".join(f"c.{m} AS {m}" for m in METRICS)}"""):
         commits[r["id"]]={"ts":r["ts"] or 0,"buggy":int(bool(r["b"])),
+                          "message":(r["msg"] or ""),
                           **{m:(r[m] if r[m] is not None else 0.0) for m in METRICS}}
     print(f"  commits: {len(commits)}")
     tokens=defaultdict(list)
@@ -136,7 +137,8 @@ def main():
     # M1: structural TF-IDF
     docs=[" ".join((tok+" ")*int(min(n,20)) for tok,n in tokens.get(c,())) for c in cids]
     vec=TfidfVectorizer(token_pattern=r"[^\s]+", min_df=3)
-    Xt=vec.fit_transform(docs)
+    vec.fit([docs[i] for i in train])      # leakage-free: vocab+IDF from TRAIN only
+    Xt=vec.transform(docs)
     lr=LogisticRegression(max_iter=2000,class_weight="balanced")
     lr.fit(Xt[train],y[train]); pt=lr.predict_proba(Xt[test])[:,1]
     a=evalp(y[test],pt); print(f"{'M1 structural TF-IDF':<26}{a[0]:8.3f}{a[1]:8.3f}{a[2]:7.3f}{a[3]:7.3f}")

@@ -74,8 +74,13 @@ def changed_java_files(commit):
     for line in r.stdout.splitlines():
         parts = line.split("\t")
         st = parts[0]
-        if st.startswith("R"):                       # rename: treat as add of new path
-            newp = parts[2]
+        if st.startswith("R"):                       # rename: retire old path, add new
+            oldp, newp = parts[1], parts[2]
+            # retire the old path's AST (so it is not left as an alive "ghost"),
+            # then bring in the new path. Without the explicit ("D", oldp) the old
+            # subtree would stay alive=true forever (the V1 rename bug).
+            if oldp.endswith(".java"):
+                out.append(("D", oldp))
             if newp.endswith(".java"):
                 out.append(("A", newp))
         elif st in ("A", "M", "D") and parts[1].endswith(".java"):
@@ -239,7 +244,8 @@ def process_modify(session, commit_id, file_id, before_bytes, after_bytes, node_
 
     # ---- deleted: mark removed + REMOVES edge ----
     removes = [gid_of(b) for b in d["deleted"]]
-    st["removes"] = st["total"] = st["total"] + len(removes)
+    st["removes"] = len(removes)
+    st["total"] += len(removes)
 
     # ---- inserted: new graph nodes, wired to parent (matched or new) ----
     inserts = []

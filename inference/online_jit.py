@@ -119,8 +119,8 @@ def load_stream_data():
 #  and per-block PPR are identical regardless of which subset is used), then
 #  evaluate any subset with a light prequential expanding-window LR.
 # ===========================================================================
-FEATURES = ["metrics", "tfidf", "priors", "ppr"]
-FEAT_ABBR = {"metrics": "M", "tfidf": "T", "priors": "R", "ppr": "P"}
+FEATURES = ["metrics", "tfidf", "priors", "ppr", "text"]
+FEAT_ABBR = {"metrics": "M", "tfidf": "T", "priors": "R", "ppr": "P", "text": "X"}
 
 def _lr(sparse=False):
     return LogisticRegression(max_iter=1500, class_weight="balanced",
@@ -129,7 +129,7 @@ def _lr(sparse=False):
 def precompute_streams(force=False):
     """Run the leakage-free online growth ONCE and return the four feature
     streams (cached to disk). No model training here."""
-    cache_s = OUT / "online_jit_streams.pkl"
+    cache_s = OUT / "online_jit_streams_v2.pkl"   # v2: adds the commit-text stream
     if cache_s.exists() and not force:
         return pickle.load(open(cache_s, "rb"))
     commits, tokens, files, devs = load_stream_data()
@@ -139,6 +139,10 @@ def precompute_streams(force=False):
     docs = [" ".join((t+" ")*int(min(k,20)) for t,k in tokens.get(c,())) for c in cids]
     Xh = HashingVectorizer(n_features=HASH_DIM, alternate_sign=False,
                            token_pattern=r"[^\s]+").transform(docs)
+    # commit-message text stream (natural-language words, lowercased)
+    msgs = [str(commits[c].get("message", "")) for c in cids]
+    Xtext = HashingVectorizer(n_features=HASH_DIM, alternate_sign=False,
+                              ngram_range=(1, 2), lowercase=True).transform(msgs)
     C, P, _, Nn = oi.build_incidence(cids, tokens, files, devs)
     W = int(N*WARMUP_FRAC)
     Xms = StandardScaler().fit(Xm[:W]).transform(Xm)
@@ -164,14 +168,15 @@ def precompute_streams(force=False):
         sc = rb[:N]/(rb[:N]+rg[:N]+1e-12); ppr_full[idx] = sc[idx]
         for k in idx: Xp[k] = prior_feats(cids[k]); grow(k, cids[k])
         i = j
-    S = dict(y=y, N=N, W=W, Xms=Xms, Xp=Xp, Xh=Xh, ppr_full=ppr_full)
+    S = dict(y=y, N=N, W=W, Xms=Xms, Xp=Xp, Xh=Xh, ppr_full=ppr_full, Xtext=Xtext)
     pickle.dump(S, open(cache_s, "wb")); return S
 
-def run_subset(S, metrics=False, tfidf=False, priors=False, ppr=False,
+def run_subset(S, metrics=False, tfidf=False, priors=False, ppr=False, text=False,
                block=BLOCK, refit=REFIT_EVERY, roll=ROLL):
     """Prequential expanding-window LR over the selected feature subset."""
     Xms, Xp, Xh, ppr_full, y, W, N = (S["Xms"], S["Xp"], S["Xh"], S["ppr_full"],
                                       S["y"], S["W"], S["N"])
+    Xtext = S.get("Xtext")
     def dense_cols(idx):
         parts = []
         if metrics: parts.append(Xms[idx])
@@ -183,6 +188,7 @@ def run_subset(S, metrics=False, tfidf=False, priors=False, ppr=False,
         d = dense_cols(idx)
         if d is not None: mats.append(sp.csr_matrix(scaler.transform(d)))
         if tfidf: mats.append(Xh[idx])
+        if text and Xtext is not None: mats.append(Xtext[idx])
         return sp.hstack(mats).tocsr() if mats else None
     def fit_scaler(upto):
         d = dense_cols(np.arange(upto))
@@ -203,10 +209,10 @@ def run_subset(S, metrics=False, tfidf=False, priors=False, ppr=False,
     return dict(cum=final_metrics(y[ev], p), traj=traj, p=p, y=y[ev])
 
 def ablation_all(S):
-    """Evaluate all 15 non-empty subsets of the four Fusion features."""
+    """Evaluate all non-empty subsets of the Fusion features (M,T,R,P,X)."""
     import itertools
     res = {}
-    for r in range(1, 5):
+    for r in range(1, len(FEATURES) + 1):
         for combo in itertools.combinations(FEATURES, r):
             mask = {f: (f in combo) for f in FEATURES}
             label = "+".join(FEAT_ABBR[f] for f in FEATURES if f in combo)
