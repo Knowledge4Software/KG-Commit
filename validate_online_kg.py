@@ -85,6 +85,71 @@ def check_correctness(session, file_state):
     return results
 
 
+# ── A3 (V3): FULL-TREE correctness — includes identifier leaves, multiset, all files ─
+
+def _signature_multiset(nodes):
+    """Counter over (ast_type, value, is_leaf) for EVERY node (incl. leaves).
+
+    Unlike positioned_set (structured nodes only, set of (line,col)), this covers
+    the ~64% identifier leaves too and is a multiset, so a missing/extra/renamed
+    node anywhere in the tree is detected."""
+    from collections import Counter
+    return Counter((str(n.get("ast_type")), str(n.get("value")), bool(n.get("is_leaf")))
+                   for n in nodes)
+
+
+def check_full_tree(session, file_state, limit=None):
+    """For EVERY evolved file, compare the graph's ALIVE subtree to a fresh
+    ground-truth parse at the file's current stored state, over the full node
+    multiset (type,value,leaf) including leaves. Reports exact-match rate and the
+    node coverage backing the claim (answers reviewer concern N4)."""
+    print("="*70)
+    print("FULL-TREE CORRECTNESS: graph alive-AST vs ground truth (incl. leaves)")
+    print("="*70)
+    base = bok.BASE_COMMIT
+    evolved = {f: c for f, c in file_state.items() if c != base}
+    items = sorted(evolved.items())
+    if limit:
+        items = items[:limit]
+    print(f"{len(items)} evolved files; full-multiset check...\n")
+
+    exact = 0; checked = 0; graph_nodes = 0; gt_nodes = 0; mism = []
+    for f, state_commit in items:
+        rows = session.run("""
+            MATCH (a:ASTNode {file:$f}) WHERE coalesce(a.alive,true)
+            RETURN a.ast_type AS ast_type, a.value AS value, a.is_leaf AS is_leaf
+        """, f=f).data()
+        blob = bok.git_bytes(state_commit, f)
+        if blob is None:
+            continue
+        ast = bok.build_full_ast(blob, f)
+        if ast is None:
+            continue
+        checked += 1
+        g_ms = _signature_multiset(rows)
+        t_ms = _signature_multiset(ast["nodes"])
+        graph_nodes += sum(g_ms.values()); gt_nodes += sum(t_ms.values())
+        if g_ms == t_ms:
+            exact += 1
+        else:
+            # symmetric difference magnitude = number of node slots that disagree
+            diff = sum((g_ms - t_ms).values()) + sum((t_ms - g_ms).values())
+            mism.append((f.split("/")[-1], len(list((g_ms - t_ms).elements())),
+                         len(list((t_ms - g_ms).elements())), diff))
+
+    print(f"exact full-tree match: {exact}/{checked} files "
+          f"({(exact/checked*100 if checked else 0):.1f}%)")
+    print(f"nodes compared: graph={graph_nodes:,}  ground-truth={gt_nodes:,}")
+    if mism:
+        mism.sort(key=lambda r: -r[3])
+        print(f"\n{len(mism)} files with a mismatch (top 10 by disagreement):")
+        print(f"{'graph+':>7} {'truth+':>7} {'diff':>6}  file")
+        for name, gextra, textra, diff in mism[:10]:
+            print(f"{gextra:7d} {textra:7d} {diff:6d}  {name}")
+    return dict(exact=exact, checked=checked, graph_nodes=graph_nodes,
+                gt_nodes=gt_nodes, mismatched=len(mism))
+
+
 # ── B. visualizations ────────────────────────────────────────────────────────
 
 def viz_file_evolution(session, file_id):
@@ -160,6 +225,7 @@ def main():
 
         # ---- correctness ----
         results = check_correctness(s, file_state)
+        full = check_full_tree(s, file_state)
 
         # ---- pick interesting files for viz ----
         print("\n" + "="*70); print("VISUALIZATIONS"); print("="*70)
@@ -193,9 +259,12 @@ def main():
             print(f"  new-file AST: {out.name}  ({n} nodes)  {pick[0]['f']}")
 
         Path("outputs/online_kg_validation.json").write_text(json.dumps({
-            "evolved_files_checked": len(results),
-            "avg_precision": round(sum(x[3] for x in results)/len(results),3) if results else None,
-            "avg_recall": round(sum(x[4] for x in results)/len(results),3) if results else None,
+            "positioned_check": {
+                "evolved_files_checked": len(results),
+                "avg_precision": round(sum(x[3] for x in results)/len(results),3) if results else None,
+                "avg_recall": round(sum(x[4] for x in results)/len(results),3) if results else None,
+            },
+            "full_tree_check": full,
         }, indent=2))
         print(f"\n  HTML -> {OUT_DIR}")
     driver.close()

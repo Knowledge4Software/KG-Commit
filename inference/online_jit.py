@@ -119,19 +119,38 @@ def load_stream_data():
 #  and per-block PPR are identical regardless of which subset is used), then
 #  evaluate any subset with a light prequential expanding-window LR.
 # ===========================================================================
-FEATURES = ["metrics", "tfidf", "priors", "ppr", "text"]
-FEAT_ABBR = {"metrics": "M", "tfidf": "T", "priors": "R", "ppr": "P", "text": "X"}
+FEATURES = ["metrics", "tfidf", "priors", "ppr", "text", "cstg"]
+FEAT_ABBR = {"metrics": "M", "tfidf": "T", "priors": "R", "ppr": "P", "text": "X",
+             "cstg": "G"}   # G = Commit Semantic-Text Graph
+DIFFS = OUT.parent / "data/apachejit/apachejit_with_diffs_rebuilt.csv"
 
 def _lr(sparse=False):
     return LogisticRegression(max_iter=1500, class_weight="balanced",
                               solver="liblinear" if sparse else "lbfgs")
 
+def cstg_streams(cids, y):
+    """Enhanced ONLINE CSTG streams (graph-of-words-weighted text with add/remove
+    polarity, NPMI-propagated past-only prior, and typed mass). See
+    cstg_online_features.build_online_streams. Returns (Xtext, prior, typed)."""
+    import cstg_online_features as cof
+    S = cof.build_online_streams(list(cids), np.asarray(y))
+    return S["Xtext"], S["prior"], S["typed"]
+
 def precompute_streams(force=False):
-    """Run the leakage-free online growth ONCE and return the four feature
-    streams (cached to disk). No model training here."""
-    cache_s = OUT / "online_jit_streams_v2.pkl"   # v2: adds the commit-text stream
+    """Run the leakage-free online growth ONCE and return the feature streams
+    (cached). v3 adds the CSTG stream (G), reusing the v2 streams if present."""
+    cache_s = OUT / "online_jit_streams_v5.pkl"   # v5: + intent-consistency block
     if cache_s.exists() and not force:
         return pickle.load(open(cache_s, "rb"))
+    import cstg_consistency as cc
+    v2 = OUT / "online_jit_streams_v2.pkl"
+    if v2.exists() and not force:
+        S = pickle.load(open(v2, "rb"))
+        commits, tokens, files, devs = load_stream_data()
+        cids = sorted(commits, key=lambda c: commits[c]["ts"])
+        S["Xcstg"], S["cstg_prior"], S["cstg_typed"] = cstg_streams(cids, S["y"])
+        S["cstg_consist"], _ = cc.build(commits, tokens, files, cids)
+        pickle.dump(S, open(cache_s, "wb")); return S
     commits, tokens, files, devs = load_stream_data()
     cids = sorted(commits, key=lambda c: commits[c]["ts"])
     y = np.array([commits[c]["buggy"] for c in cids]); N = len(cids)
@@ -169,19 +188,27 @@ def precompute_streams(force=False):
         for k in idx: Xp[k] = prior_feats(cids[k]); grow(k, cids[k])
         i = j
     S = dict(y=y, N=N, W=W, Xms=Xms, Xp=Xp, Xh=Xh, ppr_full=ppr_full, Xtext=Xtext)
+    S["Xcstg"], S["cstg_prior"], S["cstg_typed"] = cstg_streams(cids, y)
+    S["cstg_consist"], _ = cc.build(commits, tokens, files, cids)
     pickle.dump(S, open(cache_s, "wb")); return S
 
 def run_subset(S, metrics=False, tfidf=False, priors=False, ppr=False, text=False,
-               block=BLOCK, refit=REFIT_EVERY, roll=ROLL):
+               cstg=False, block=BLOCK, refit=REFIT_EVERY, roll=ROLL):
     """Prequential expanding-window LR over the selected feature subset."""
     Xms, Xp, Xh, ppr_full, y, W, N = (S["Xms"], S["Xp"], S["Xh"], S["ppr_full"],
                                       S["y"], S["W"], S["N"])
-    Xtext = S.get("Xtext")
+    Xtext = S.get("Xtext"); Xcstg = S.get("Xcstg")
+    cstg_prior = S.get("cstg_prior"); cstg_typed = S.get("cstg_typed")
+    cstg_consist = S.get("cstg_consist")
     def dense_cols(idx):
         parts = []
         if metrics: parts.append(Xms[idx])
         if priors:  parts.append(Xp[idx])
         if ppr:     parts.append(ppr_full[idx][:, None])
+        if cstg and cstg_prior is not None:
+            parts.append(cstg_prior[idx][:, None])
+            if cstg_typed is not None: parts.append(cstg_typed[idx])
+            if cstg_consist is not None: parts.append(cstg_consist[idx])
         return np.hstack(parts) if parts else None
     def build(idx, scaler):
         mats = []
@@ -189,6 +216,7 @@ def run_subset(S, metrics=False, tfidf=False, priors=False, ppr=False, text=Fals
         if d is not None: mats.append(sp.csr_matrix(scaler.transform(d)))
         if tfidf: mats.append(Xh[idx])
         if text and Xtext is not None: mats.append(Xtext[idx])
+        if cstg and Xcstg is not None: mats.append(Xcstg[idx])
         return sp.hstack(mats).tocsr() if mats else None
     def fit_scaler(upto):
         d = dense_cols(np.arange(upto))

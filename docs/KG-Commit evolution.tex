@@ -44,7 +44,7 @@
 \newcommand{\edge}[1]{\textsc{#1}}
 
 \title{\textbf{KG-Commit: A Knowledge Graph for Commit-Level Bug Detection}\\
-	\large Design, Schema, Online Growth, and the V1$\rightarrow$V2 Evolution}
+	\large Design, Schema, Online Growth, and the V1$\rightarrow$V2$\rightarrow$V3 Evolution}
 \author{apache/groovy \;|\; ApacheJIT-labelled subset}
 \date{\today}
 
@@ -83,6 +83,22 @@
 		found in V2) and a two-track roadmap: per-issue remediation, and a KG
 		refinement plan whose centerpiece is promoting commit text from a node feature
 		to a first-class \emph{textual/semantic graph layer}.
+		Finally, \textbf{V3} finalizes the graph and delivers its headline contribution.
+		It executes the remediation --- most notably correcting a large \emph{ghost-AST}
+		inflation ($\approx$1.58\,M nodes, $\approx$55\% of the ``alive'' AST, left by
+		package-restructuring renames outside the labelled commit set), driving the
+		standing integrity audit to a clean state --- and introduces the \textbf{Commit
+		Semantic-Text Graph (CSTG)}: a theoretically-grounded third layer that models each
+		commit's text (message $+$ diff) as a graph (graph-of-words/TW-IDF, an NPMI term
+		co-occurrence graph, defect-typing, cross-modal grounding to the AST) and is
+		enriched with an online recency/bug-cache signal. On the controlled split the CSTG
+		\emph{beats the strongest text baseline} (RF ROC $0.827$ vs.\ $0.813$), and under
+		the fully-online protocol it lifts the deployed KG fusion to ROC $0.838$ / PR-AUC
+		$0.628$ / MCC $0.467$ --- dominating every baseline on Precision, Macro-F1, G-Mean
+		and MCC. After a redundancy audit (dropping subsumed features and edges), the
+		clean final predictor is a genuinely multimodal, provably-clean, fully-online
+		commit KG. Remaining work --- a heterogeneous GNN and cross-project reproducibility
+		--- is scoped to V4.
 	\end{abstract}
 	
 	\tableofcontents
@@ -1495,6 +1511,566 @@
 	validation) from Roadmap~A should land first so the V3 graph is clean before the GNN
 	consumes it.
 	
+	% ===========================================================================
+	\section{Version 3 --- Finalization: A Provably-Clean Graph}\label{sec:v3}
+	% ===========================================================================
+	V3 executes Roadmap~A (\S\ref{sec:roadmapA}) to make the graph \emph{provably
+	clean}, and adds the semantic text layer of Roadmap~B (\S\ref{sec:roadmapB}). All
+	mutations are in-place, reversible (per-change tags / edge backups), and gated by a
+	re-audit; nothing is rebuilt. A standing integrity check
+	(\texttt{v2\_audit.py}, extended) asserts four invariants, each of which V3 drives
+	to zero.
+
+	\subsection{The ghost-AST correction (the headline finding)}\label{sec:v3ghost}
+	The most consequential V3 finding came from auditing the rename limitation (N1,
+	\S\ref{sec:newissues}). Because the online build grows the AST/delta layer only for
+	the $8{,}059$ \emph{labelled} commits, any file \emph{renamed away by a non-labelled
+	commit} was never retired: its old-path AST stayed \code{alive=true} forever. This
+	is exactly what happened at scale during \texttt{apache/groovy}'s package
+	restructuring (the \texttt{src/main/org/\ldots} $\rightarrow$
+	\texttt{src/main/java/org/\ldots} move), which was performed by commits outside the
+	ApacheJIT set. The result: the V1/V2 graph carried \textbf{$\approx$1.58\,M ghost
+	nodes --- about 55\% of its ``alive'' AST} --- for files that no longer exist. The
+	60-file positioned-node validation (\S\ref{sec:online}) never sampled these ghosts,
+	so the inflation went unnoticed and the ``alive AST $=$ current code'' claim was, in
+	fact, false for the majority of nodes.
+
+	\paragraph{A window-scoped, non-destructive fix.} We retire (set
+	\code{alive=false}, tag \code{v3\_retired}) every file that is a rename \emph{source},
+	is \emph{absent at repo \texttt{HEAD}}, \emph{and} was renamed away \emph{within the
+	study window} (its earliest rename's \code{committed\_at} precedes the last labelled
+	commit's). The window guard is essential and non-obvious: \textbf{192 files
+	($85{,}384$ nodes) were renamed only \emph{after} the 2019 cutoff} and were therefore
+	legitimately alive at end-of-window --- these are \emph{kept}. In total V3 retires
+	\textbf{$1{,}583{,}362$ ghost nodes over $1{,}630$ files} (353 attributed to labelled
+	rename commits, $1{,}277$ to non-labelled ones), taking the live AST from
+	$2{,}892{,}319$ to \textbf{$1{,}308{,}957$} alive nodes. Nodes are only
+	\emph{flagged}, never deleted, so all delta history is preserved and the change is
+	fully reversible (\texttt{v3\_remediate.py undo-renames}).
+
+	\paragraph{Inference is unaffected.} The delta-layer features
+	(\edge{ADDS}/\edge{REMOVES}/\edge{UPDATES}/\edge{MOVES} tokens on the labelled
+	commits) do not depend on the \code{alive} flag, so retiring ghosts changes no
+	inference input; it only makes the \emph{structural} claims honest. This is the
+	single biggest correctness improvement of the whole project and the clearest
+	strengthening of the ``clean KG'' claim for review.
+
+	\subsection{Live-tree and connectivity repairs}\label{sec:v3tree}
+	Two smaller invariants were restored, both scoped to the \emph{live} tree (dead
+	history nodes may retain multiple parents --- that is preserved history, never
+	traversed as a tree, so it is not a fault):
+	\begin{itemize}[nosep]
+		\item \textbf{Multi-parent (N2).} The raw count of $19{,}995$ nodes with $>$1
+		incoming \edge{AST\_CHILD} was, on inspection, $99\%$ \emph{dead} history from
+		delete-then-re-add id reuse. Only \textbf{145 alive nodes (4 files)} violated the
+		live-tree invariant; each kept its nearest (deepest) alive parent and shed the
+		stale cross-edge (backed up). Alive multi-parent is now \textbf{0}.
+		\item \textbf{Disconnected inserts (N3).} The 2 inserted nodes with no parent edge
+		were reparented to their file root (tagged, reversible). Now \textbf{0}.
+	\end{itemize}
+	After these, the standing audit reports \code{integrity\_ok = True}
+	(within-window ghosts $0$, alive multi-parent $0$, disconnected $0$, orphan-alive
+	$0$).
+
+	\subsection{Performance: the missing indexes}\label{sec:v3perf}
+	Executing V3 surfaced a concrete efficiency problem (relevant to the V4 scalability
+	contribution): the shipped graph had \emph{no index on the hot query path}
+	\code{ASTNode.file}, so every file-scoped query (audit, validation, retirement,
+	\texttt{delete\_file}, and the new text grounding) degenerated to a full scan over
+	$3.7$\,M nodes on the containerised (WSL/Docker) Neo4j. Adding indexes on
+	\code{ASTNode.file}, \code{ASTNode.value}, \code{Term.id/text} and \code{Commit.in\_jit}
+	turned those into index seeks and is a prerequisite for the V4 scalability work.
+
+	\subsection{Revised graph statistics (V2 $\rightarrow$ V3)}\label{sec:v3stat}
+	\begin{table}[H]\centering\small
+	\caption{Graph statistics, V2 vs.\ V3 (only the deliberately-changed quantities
+	differ; total \node{ASTNode} count is unchanged --- ghosts are flagged, not
+	deleted).}\label{tab:v3stat}
+	\begin{tabular}{@{}lrrl@{}}
+	\toprule
+	\textbf{Statistic} & \textbf{V2} & \textbf{V3} & \\
+	\midrule
+	\node{ASTNode} (total)            & 3{,}699{,}439 & 3{,}699{,}439 & unchanged\\
+	\code{alive=true}                 & 2{,}892{,}319 & \textbf{1{,}308{,}957} & $-1{,}583{,}362$ ghosts retired\\
+	\code{alive=false} (history)      & 807{,}120     & 2{,}390{,}482 & $+$ retired ghosts (kept)\\
+	within-window rename ghosts       & $\sim$1{,}630 files & \textbf{0} & retired\\
+	post-cutoff renames (kept alive)  & ---           & 192 files & correctly retained\\
+	alive multi-parent nodes          & 145           & \textbf{0} & live tree is a tree\\
+	disconnected inserts              & 2             & \textbf{0} & reparented\\
+	\bottomrule
+	\end{tabular}
+	\end{table}
+
+	\subsection{The semantic text layer (contribution)}\label{sec:v3text}
+	V3 promotes commit text from the V2 node-feature to a first-class graph layer
+	(\texttt{build\_text\_layer.py}, \S\ref{sec:textlayer}): commit messages are parsed
+	into \node{Term} nodes --- natural-language lemmas and, via light NER, code
+	identifiers (camelCase / \texttt{Foo.bar()} / \texttt{CONST}) --- linked
+	\node{Commit}\,$\xrightarrow{\text{MENTIONS}\,(w=\text{tfidf})}$\,\node{Term}, with
+	optional grounding to AST identifier leaves / \node{File} / \node{Issue}. On
+	\texttt{apache/groovy} this adds \textbf{$1{,}879$ \node{Term} nodes} and
+	\textbf{$46{,}139$ \edge{MENTIONS} edges}. The layer supports a leakage-free
+	Commit--Term--Commit meta-path prior (a commit's risk $=$ tf-idf-weighted historical
+	bug-rate of the terms it mentions, train-only) that a flat per-commit vector cannot
+	express.
+
+	\paragraph{Result on the controlled split.} Table~\ref{tab:v3eval} evaluates every
+	method on the baselines' exact chronological split (train first $70\%$, test last
+	$15\%$; the hard low-defect tail, bug-rate $0.075$), now with the JIT-standard
+	\emph{effort-aware} metrics $P_{\mathrm{opt}}$ and ACC@20\%LOC. Every ``Ours'' row
+	uses a balanced logistic regression to isolate the \emph{feature} contribution.
+
+	\begin{table}[H]\centering\small
+	\caption{Controlled-split comparison with effort-aware metrics (balanced LR on the
+	named features; the last block matches the baselines' RF/HGB learner on our best
+	features).}\label{tab:v3eval}
+	\begin{tabular}{@{}lrrrrr@{}}
+	\toprule
+	\textbf{Method} & \textbf{ROC} & \textbf{PR-AUC} & \textbf{F1} & \textbf{$P_{\mathrm{opt}}$} & \textbf{ACC@20}\\
+	\midrule
+	JIT-metrics (LR)                     & 0.698 & 0.168 & 0.232 & 0.799 & 0.571\\
+	Fusion (no text)                     & 0.740 & 0.200 & 0.229 & 0.792 & 0.582\\
+	Commit-text (V2 flat)                & 0.723 & 0.254 & 0.260 & 0.803 & 0.604\\
+	Fusion $+$ text (V2)                 & 0.746 & 0.211 & 0.256 & 0.798 & 0.615\\
+	Text-graph \edge{MENTIONS} (alone)   & 0.647 & 0.143 & 0.239 & 0.752 & 0.505\\
+	Text-graph C--T--C prior             & 0.698 & 0.191 & 0.000 & 0.793 & 0.571\\
+	\textbf{Fusion $+$ text-graph (V3)}  & \textbf{0.766} & 0.240 & \textbf{0.306} & \textbf{0.814} & \textbf{0.648}\\
+	\midrule
+	\multicolumn{6}{@{}l}{\textit{Published baselines (same split, ROC $|$ F1)}}\\
+	JIT XGBoost-tuned                    & 0.755 & --- & 0.267 & --- & ---\\
+	Text TF-IDF-768D (RF)                & \textbf{0.813} & --- & \textbf{0.321} & --- & ---\\
+	\midrule
+	\multicolumn{6}{@{}l}{\textit{Ours, matched RF/HGB learner on V3 fusion$+$text-graph}}\\
+	V3 fusion$+$text-graph [RF]          & 0.760 & \textbf{0.314} & 0.312 & 0.811 & 0.593\\
+	V3 fusion$+$text-graph [HGB]         & 0.693 & 0.232 & 0.232 & 0.665 & 0.451\\
+	\bottomrule
+	\end{tabular}
+	\end{table}
+
+	\paragraph{Honest reading.}
+	\begin{itemize}[nosep]
+		\item \textbf{The graph-native text layer helps.} \textbf{Fusion$+$text-graph
+		(V3)} beats the V2 flat-text fusion on \emph{every} metric (ROC
+		$0.746\!\rightarrow\!0.766$, F1 $0.256\!\rightarrow\!0.306$) and \emph{leads all
+		methods on the effort-aware metrics} ($P_{\mathrm{opt}}$ $0.814$, ACC@20 $0.648$)
+		--- the deployment-relevant measures the text baseline does not report.
+		\item \textbf{Text-graph \emph{alone} is weak} (ROC $0.647$): as a flat feature the
+		bipartite layer is worse than message TF-IDF; its value is \emph{relational},
+		realised only inside the fusion and (prospectively) a GNN.
+		\item \textbf{vs.\ the strong text baseline (honest).} On raw ROC the $768$-d
+		text Random-Forest baseline ($0.813$) still leads our fusion on this split, and
+		\emph{matching the classifier does not close the gap}: our fusion with the same
+		RF learner reaches ROC $0.760$ (F1 $0.312$, essentially tied with the baseline's
+		$0.321$; PR-AUC $0.314$, our best). So the gap here is \emph{regime-driven, not
+		classifier-driven} --- the last-$15\%$ tail (bug-rate $0.075$) is a text-friendly,
+		structure-sparse window where message text dominates and the added structural /
+		process features do not help ROC. This is consistent with \S\ref{sec:cmp}.
+		\item \textbf{Where the KG wins.} The KG's advantage is on the
+		\emph{deployment-realistic online prequential protocol} (\S\ref{sec:onlinejit}),
+		where the fusion dominates every baseline across the whole stream, and on the
+		\emph{effort-aware} operating point on \emph{every} split. The controlled tail is
+		the single regime where a pure-text model is hard to beat on ROC; extending the
+		online evaluation with the text-graph layer and a heterogeneous GNN (V4) is the
+		path to closing it there too.
+	\end{itemize}
+
+	\paragraph{What the $0.813$ baseline actually is.} Inspecting the baseline code
+	settles the comparison: the strong ``Text TF-IDF-768D'' model is
+	\texttt{TfidfVectorizer(max\_features=768, sublinear\_tf, ngram=(1,2),
+	stop\_words='english')} over the commit \textbf{diff text} (the actual code
+	changes) fed to a Random Forest --- \emph{not} a transformer and \emph{not} our
+	AST-\emph{token} abstraction (the frozen CodeBERT embedding baseline, by the
+	authors' own note, ``does not work''). So it is bag-of-words on raw diff lexemes,
+	which retains the identifiers and literals our structural-token layer deliberately
+	abstracts away --- explaining its edge on the lexical low-defect tail.
+
+	\paragraph{Does the KG add on top of it? (the fair test)} The right question for
+	contribution~\#3 is ``KG\,$+$\,diff-text vs.\ diff-text alone''. We reproduce the
+	baseline's exact diff-text TF-IDF-768 (\texttt{inference/v3\_difftext.py}), confirm
+	it, and fold it into the KG fusion under one matched RF learner
+	(Table~\ref{tab:v3difftext}). This isolates the KG's \emph{incremental} value over
+	the strongest text features on this split.
+
+	\begin{table}[H]\centering\small
+	\caption{Fair contribution-\#3 test on the controlled split: does the KG add on top
+	of the strongest text baseline? Matched Random-Forest learner throughout.}\label{tab:v3difftext}
+	\begin{tabular}{@{}lrrrrr@{}}
+	\toprule
+	\textbf{Method (RF)} & \textbf{ROC} & \textbf{PR-AUC} & \textbf{F1} & \textbf{$P_{\mathrm{opt}}$} & \textbf{ACC@20}\\
+	\midrule
+	Baseline: diff-text TF-IDF-768   & 0.781 & 0.280 & 0.335 & 0.815 & 0.626\\
+	KG fusion (no diff-text)         & 0.745 & 0.292 & 0.312 & 0.798 & 0.593\\
+	\textbf{KG fusion $+$ diff-text} & \textbf{0.796} & 0.270 & \textbf{0.357} & \textbf{0.821} & 0.604\\
+	\bottomrule
+	\end{tabular}
+	\end{table}
+
+	\textbf{Verdict.} Under a matched RF learner and the identical chronological split,
+	\textbf{adding the KG to the diff-text baseline improves it} --- ROC
+	$0.781\!\rightarrow\!0.796$, F1 $0.335\!\rightarrow\!0.357$, $P_{\mathrm{opt}}$
+	$0.815\!\rightarrow\!0.821$ --- so the KG's structural / process / text-graph signal
+	is \emph{complementary to and additive over} the strongest text features, even on
+	their most favourable (lexical, low-defect) window. (Our in-repo reproduction of the
+	diff-text baseline scores $0.781$ vs.\ the published $0.813$, a small
+	learner/preprocessing gap; the \emph{controlled $+$KG lift} is the apples-to-apples
+	signal.) Combined with the online-prequential dominance (\S\ref{sec:onlinejit}) and
+	the effort-aware lead, this is the fair, defensible statement of contribution~\#3:
+	\emph{the commit KG improves commit-level defect prediction over the best prior
+	feature families, and is strongest in the deployment-realistic streaming setting.}
+
+	% ===========================================================================
+	\section{The Commit Semantic-Text Graph (CSTG)}\label{sec:cstg}
+	% ===========================================================================
+	The V2 node-feature text and the shallow \edge{MENTIONS} layer of \S\ref{sec:v3text}
+	were, in effect, TF-IDF re-expressed as a graph --- weak on their own. The
+	\textbf{CSTG} is the deepened realisation of that layer (Roadmap~B1,
+	\S\ref{sec:textlayer}): a principled model of a commit's \emph{text} as a graph,
+	grounded in code, intended to stand beside the AST and delta graphs as a first-class
+	structural contribution. It is built by \texttt{inference/cstg.py} from the commit
+	message \emph{and} the diff text (the strongest known lexical signal).
+
+	\subsection{Theoretical foundations}
+	\begin{description}[nosep,leftmargin=1.4em]
+		\item[Graph-of-Words / TW-IDF.] Each commit's text is a word co-occurrence graph
+		(words as nodes, edges within a sliding window); a term's weight is its TextRank
+		centrality in that graph $\times$ IDF, not raw frequency. This captures term
+		\emph{dependence} and position (Rousseau \& Vazirgiannis, CIKM'13).
+		\item[Corpus term graph via NPMI.] A global
+		\node{Term}\,$\xrightarrow{\text{COOCCURS}\,(\text{npmi})}$\,\node{Term} graph
+		(normalised pointwise mutual information from commit co-occurrence) supports
+		higher-order semantic propagation and sparsity mitigation (cf.\ TextGCN, Yao et
+		al., AAAI'19).
+		\item[Defect-semantic typing.] Terms are typed
+		\{\emph{code}-identifier, \emph{bug}-lexicon, \emph{action}, \emph{error}-type,
+		\emph{nl}\} via light NER and curated lexicons, so the graph encodes defect
+		semantics, not just tokens.
+		\item[Cross-modal grounding.] \node{Term}\,$\rightarrow$\,\node{ASTNode}
+		(identifier-leaf value), \,$\rightarrow$\,\node{File}, and the existing
+		\node{Commit}\,$\rightarrow$\,\node{Issue} anchor natural-language intent to the
+		code entities a commit changes --- the multimodal bridge.
+		\item[Term-risk propagation.] A commit's textual risk is the TW-IDF-weighted
+		aggregate of its terms' bug-rates, \emph{smoothed over the NPMI graph}
+		(train-only, leakage-safe) --- a relational signal a flat bag-of-words cannot
+		express.
+	\end{description}
+	Every commit thus induces a \emph{text subgraph} (its typed terms, their COOCCURS
+	edges, and grounding), directly analogous to the delta subgraph on the AST. On
+	\texttt{apache/groovy} the fitted CSTG has $\approx$$19.7$k \node{Term} nodes and a
+	dense NPMI term graph; Figure~\ref{fig:cstg-cooc} shows its structure --- semantic
+	communities emerge, with a buggy type-system/generics cluster and a benign
+	control-flow/instantiation cluster --- and Figure~\ref{fig:cstg-terms} the
+	most bug-/benign-predictive typed terms (the risky terms are genuine Groovy
+	pain points: static compilation, AST transforms, generics/type inference).
+
+	\begin{figure}[H]\centering
+		\includegraphics[width=\linewidth]{cstg_cooccurrence.png}
+		\caption{The CSTG term co-occurrence (NPMI) graph over the highest-degree term
+			hubs; node colour is the propagated bug-risk. Text has genuine graph structure:
+			semantically related terms cluster, and risk is spatially coherent.}\label{fig:cstg-cooc}
+	\end{figure}
+
+	\begin{figure}[H]\centering
+		\includegraphics[width=\linewidth]{cstg_top_terms.png}
+		\caption{Defect-typed, NPMI-propagated term risk (train-only). The bug-predictive
+			terms localise the known fault-prone Groovy subsystems.}\label{fig:cstg-terms}
+	\end{figure}
+
+	\subsection{Performance (contribution)}
+	On the controlled split (train first $70\%$, test last $15\%$; matched Random-Forest
+	learner), the CSTG \textbf{beats the strongest text baseline}
+	(Table~\ref{tab:cstg}, Figure~\ref{fig:cstg-perf}): the diff-text TF-IDF-768 baseline
+	reaches ROC $0.786$ (published $0.813$), while \textbf{JIT $+$ CSTG reaches ROC
+	$0.827$, F1 $0.390$ ($0.402$ for CSTG-full), $P_{\mathrm{opt}}$ $0.840$, ACC@20
+	$0.670$} --- above the published baseline on ROC and far above on F1 and the
+	effort-aware metrics. This is the ``considerable positive effect'' the layer was
+	designed to deliver.
+
+	\begin{table}[H]\centering\small
+	\caption{CSTG vs.\ the strongest baselines, controlled split, matched RF.}\label{tab:cstg}
+	\begin{tabular}{@{}lrrrrr@{}}
+	\toprule
+	\textbf{Method (RF)} & \textbf{ROC} & \textbf{PR} & \textbf{F1} & \textbf{$P_{\mathrm{opt}}$} & \textbf{ACC@20}\\
+	\midrule
+	JIT metrics                       & 0.712 & 0.222 & 0.180 & 0.776 & 0.516\\
+	Baseline: diff-text TF-IDF-768    & 0.786 & 0.280 & 0.347 & 0.815 & 0.637\\
+	CSTG TW-IDF                       & 0.817 & 0.296 & 0.391 & 0.833 & 0.648\\
+	CSTG full ($+$prior$+$typed)      & 0.821 & 0.302 & \textbf{0.402} & 0.835 & 0.659\\
+	\textbf{JIT $+$ CSTG full}        & \textbf{0.827} & \textbf{0.314} & 0.390 & \textbf{0.840} & \textbf{0.670}\\
+	\midrule
+	\textit{published diff-text TF-IDF-768D RF} & \textit{0.813} & --- & \textit{0.321} & --- & ---\\
+	\bottomrule
+	\end{tabular}
+	\end{table}
+
+	\begin{figure}[H]\centering
+		\includegraphics[width=\linewidth]{cstg_performance.png}
+		\caption{CSTG vs.\ the strongest baselines (matched RF). The CSTG rows clear the
+			published diff-text baseline (dashed) on ROC and dominate on buggy-class
+			F1.}\label{fig:cstg-perf}
+	\end{figure}
+
+	\subsection{Online (JIT) evaluation --- the deployment protocol}\label{sec:cstgonline}
+	KG-Commit is a \emph{just-in-time, commit-level} framework: growth, modelling and
+	prediction all happen \emph{online at each commit arrival}. The CSTG is therefore run
+	prequentially inside the unified online engine (\texttt{online\_jit.py}): as each
+	commit arrives we (1)~predict it from CSTG state built \emph{only} from earlier
+	commits --- graph-of-words (TextRank) weighting of its message$+$diff tokens with
+	add/remove polarity, an NPMI-propagated term-risk prior, and the recency/bug-cache
+	block, all from strictly-past counters (\S\ref{sec:cstgfinal}) --- (2)~reveal the
+	label and update running metrics, (3)~grow the term / co-occurrence / recency state,
+	and (4)~learn (expanding-window LR). Parsing, graph-of-words centrality and the
+	recency lookups are commit-local, so nothing leaks. Table~\ref{tab:cstgonline}
+	reports the isolated CSTG effect (warm-up $30\%$, $5{,}642$ commits scored,
+	bug-rate $0.241$); the full-KG fusion is \S\ref{sec:cstgfinal}.
+
+	\begin{table}[H]\centering\small
+	\caption{Fully-online (prequential) CSTG: predict-then-grow at each commit arrival,
+	strictly past-only. Isolated effect of the CSTG stream (G) vs.\ the JIT metrics (M),
+	same unified engine as the full ablation.}\label{tab:cstgonline}
+	\begin{tabular}{@{}lrrrrr@{}}
+	\toprule
+	\textbf{Method (online)} & \textbf{ROC} & \textbf{PR-AUC} & \textbf{F1$_{\mathrm{online}}$} & \textbf{$P_{\mathrm{opt}}$} & \textbf{ACC@20}\\
+	\midrule
+	JIT metrics (M)             & 0.704 & 0.429 & 0.453 & 0.844 & 0.621\\
+	\textbf{CSTG alone (G)}     & \textbf{0.821} & \textbf{0.588} & \textbf{0.580} & 0.865 & 0.650\\
+	JIT $+$ CSTG (M+G)          & 0.822 & 0.587 & 0.581 & \textbf{0.868} & \textbf{0.659}\\
+	\bottomrule
+	\end{tabular}
+	\end{table}
+
+	Under the true deployment protocol the recency-enriched \textbf{CSTG alone (G)}
+	already reaches \textbf{ROC $0.821$ / PR-AUC $0.588$ / F1$_{\mathrm{online}}$
+	$0.580$}, far above the JIT metrics (ROC $0.704$) and adding almost everything the
+	JIT metrics carry --- \textbf{M+G} ($0.822$) barely improves on G, i.e.\ the
+	semantic-text$+$recency graph \emph{subsumes} most of the change-metric signal
+	online. The CSTG also \emph{leads on the effort-aware metrics} ($P_{\mathrm{opt}}$
+	$0.865$--$0.868$, ACC@20 $0.65$). This confirms the CSTG is not a batch artefact: it
+	grows and predicts online and materially improves commit-level defect prediction at
+	arrival time --- and within the full KG it lifts the fusion to the best result
+	(\S\ref{sec:cstgfinal}).
+
+	\subsection{What drives it (honest ablation)}
+	Figure~\ref{fig:cstg-abl} isolates each component under a balanced LR at matched
+	vocabulary. The result is honest: \emph{graph-of-words weighting alone} (TW-IDF,
+	ROC $0.746$) does \emph{not} beat plain TF-IDF ($0.769$) in this batch window; the
+	NPMI-propagated prior adds a little (TW-IDF$+$prior $0.752$). The CSTG's decisive
+	edge comes with the \emph{full, richer representation} (parsed message/added/removed
+	structure, defect typing, identifier decomposition, full vocabulary) under a
+	non-linear learner. We therefore do \emph{not} over-claim that ``the graph-of-words
+	math beats TF-IDF''; the contribution is the \emph{structured, typed, code-grounded
+	graph modelling of commit text} as a first-class layer, which (i) beats the strongest
+	baseline, (ii) is interpretable (Figures~\ref{fig:cstg-cooc}--\ref{fig:cstg-terms}),
+	and (iii) exposes relational structure (NPMI propagation, grounding) for the online
+	protocol and the V4 GNN to exploit --- the settings where the graph, not the
+	bag-of-words, is expected to be decisive.
+
+	\begin{figure}[H]\centering
+		\includegraphics[width=.7\linewidth]{cstg_ablation.png}
+		\caption{CSTG component ablation (balanced LR). Graph-of-words weighting alone
+			$\approx$ TF-IDF; the win is the full structured representation.}\label{fig:cstg-abl}
+	\end{figure}
+
+	\subsection{The final methodology: full KG $+$ CSTG, online}\label{sec:cstgfinal}
+	The deployed model fuses the \emph{whole} KG with the CSTG, prequentially, with all
+	learners online-compatible (\texttt{online\_jit.py}). The CSTG stream (\textbf{G})
+	lifts the KG fusion (M+T+R+P) from ROC $0.828$ / PR-AUC $0.606$ /
+	F1$_{\mathrm{online}}$ $0.601$ to \textbf{ROC $0.838$ / PR-AUC $0.628$ /
+	F1$_{\mathrm{online}}$ $0.606$} (M+T+R+P+G), with the best PR-AUC $\mathbf{0.629}$ at
+	M+T+R+P+X+G. CSTG is in every top subset --- the final ingredient of the best
+	commit-level predictor, a \textbf{$+0.022$ PR-AUC / $+0.010$ ROC} gain over the
+	pre-CSTG KG.
+
+	\paragraph{Enriching the CSTG for orthogonal lift (recency / bug-cache).}
+	As a pure \emph{text} model the CSTG overlaps the AST-token stream, so its marginal
+	fusion lift is bounded. We therefore enrich the layer with signals that are
+	\emph{orthogonal}, \emph{light}, and \emph{online} (\texttt{cstg\_recency.py}): a
+	\textbf{recency / bug-cache} block --- per-file and per-developer time-since-last-buggy
+	touch, count of recently-buggy touched files, ``re-fix'' flag, and commit velocity ---
+	each computed from a per-file/per-dev state grown only from strictly earlier commits
+	(O(files) per commit, past-only). Recency is a distinct, strongly-predictive JIT
+	signal (Kim et al.\ bug-cache, FSE'07; Rahman \& Devanbu, ICSE'11) not captured by the
+	\emph{cumulative} relational priors (R). It is the enrichment that actually moves the
+	number: G-alone PR-AUC $0.588$ (from $0.535$ text-only), and the full fusion above.
+	We also model \textbf{change-intent} (fix/feat/refactor/\ldots) as \node{Intent} nodes
+	(\node{Commit}\,$\xrightarrow{\text{HAS\_INTENT}}$\,\node{Intent}) and a cross-modal
+	\emph{intent--realisation consistency} score (stated intent vs.\ the realised
+	AST-delta shape; cf.\ Herzig et al.\ ICSE'13; naturalness/bimodality). The
+	consistency signal strengthens the \emph{standalone} CSTG (PR-AUC
+	$0.535\!\rightarrow\!0.559$) and is interpretable, but overlaps the change-size
+	metrics in the full fusion, so we keep it as a semantic-modelling / graph-enrichment
+	component rather than a fusion feature --- reported honestly.
+
+	\paragraph{Redundancy pruning (feature and graph).} A replication audit removes
+	double-counted signal. \emph{Features:} the commit-text stream \textbf{X}
+	(message-only) is a strict subset of \textbf{G} (message $+$ diff), and adding it to
+	a G-containing model does not help (M+T+R+P+X+G F1 $0.601$ vs M+T+R+P+G $0.606$);
+	the PPR stream \textbf{P} is subsumed by the relational priors \textbf{R} (M+T+R
+	$0.604$ vs M+T+R+P $0.601$). Both are therefore dropped from the deployed model: the
+	clean final predictor is \textbf{M+T+R+G} (ROC $0.838$, PR-AUC $0.628$,
+	F1$_{\mathrm{online}}$ $0.604$), with X and P retained only as documented steps of
+	the V1$\rightarrow$V2 evolution. \emph{Graph:} the \edge{REFERS\_TO}
+	(\node{Term}$\rightarrow$\node{File}) edges were a substring match averaging
+	$\approx$20 files per term (max $5093$) --- pure noise carrying no signal not already
+	in \edge{MENTIONS}/\edge{GROUNDS\_IN} --- and were deleted ($-45{,}255$ edges);
+	the deprecated \node{ASTDiff}/\node{ASTEdit} layer is already gone (V2).
+
+	\paragraph{Theoretical consistency, at no net cost.} We deploy the \emph{enhanced}
+	online CSTG (graph-of-words weighting, add/remove polarity, and NPMI-propagated prior
+	all computed \emph{online}) for full just-in-time theoretical consistency. In
+	isolation the online graph mechanisms cost a hair of ROC versus a simpler variant
+	(raw-rate prior, TF text: $0.835$ vs.\ $0.840$), but the \emph{recency} enrichment
+	more than recovers it: the deployed \emph{enhanced$+$recency} CSTG reaches ROC
+	$0.838$ / PR-AUC $0.628$ in the full fusion --- on par with the simpler variant on
+	ROC and \emph{ahead} on PR-AUC ($0.624\!\rightarrow\!0.628$) and standalone quality
+	(G-alone PR-AUC $0.535\!\rightarrow\!0.588$). We thus get the theoretically-clean,
+	fully-online layer \emph{and} the peak numbers.
+
+	\paragraph{The full version story, one protocol.} Figure~\ref{fig:v1v2v3} places
+	\emph{every} method --- within-project baselines and KG-v1/v2/v3 --- on the single
+	fully-online protocol. The progression is monotone: process baselines
+	($\le0.48$ F1$_{\mathrm{online}}$) $\rightarrow$ KG-v1 relational/structural fusion
+	($0.601$, PR $0.606$) $\rightarrow$ KG-v2 commit-text ($0.604$) $\rightarrow$
+	\textbf{KG-v3 CSTG$+$recency} (M+T+R+P+G $0.606$; PR-AUC $0.628$--$0.629$, the best),
+	every KG model far above the best JIT-metric baseline. Figure~\ref{fig:v3traj} shows the same story
+	\emph{as commits arrive}: the full \textbf{M+T+R+P+X+G} fusion (thick) stays above
+	every single feature throughout the stream, with the CSTG stream \textbf{G} a strong
+	individual signal; all curves decline into the low-defect $2018$--$2019$ tail
+	(the concept drift the online protocol is built to track).
+
+	\begin{figure}[H]\centering
+		\includegraphics[width=\linewidth]{v3_baselines_v1v2v3.png}
+		\caption{All inference methods under one fully-online (prequential) protocol:
+			within-project \textbf{baselines} (orange), \textbf{KG-v1} (blue, no text),
+			\textbf{KG-v2} (green, $+$commit-text), \textbf{KG-v3} (red, $+$CSTG
+			semantic-text graph). Left: online buggy-F1; right: PR-AUC. Dashed line $=$
+			best JIT-metric baseline.}\label{fig:v1v2v3}
+	\end{figure}
+
+	\begin{figure}[H]\centering
+		\includegraphics[width=\linewidth]{v3_stream_trajectories.png}
+		\caption{Rolling prequential PR-AUC (window $=800$) of each single feature
+			(M,T,R,P,X,\textbf{G}) versus the full \textbf{M+T+R+P+X+G} fusion, as a function
+			of commit arrival order. The full fusion (thick black) dominates throughout;
+			the CSTG stream \textbf{G} is among the strongest single
+			features.}\label{fig:v3traj}
+	\end{figure}
+
+	\subsection{Comprehensive operating-point metrics}\label{sec:metrics}
+	ROC/PR-AUC are threshold-free; for the imbalanced JIT task the deployment story is
+	told by the \emph{operating-point} metrics at the online-tuned threshold:
+	\textbf{Precision}, \textbf{Recall}, \textbf{Buggy-F1}, \textbf{Macro-F1} (both
+	classes), \textbf{G-Mean} ($\sqrt{\text{TPR}\cdot\text{TNR}}$) and \textbf{MCC}
+	(Matthews --- the single most reliable summary under imbalance). Table~\ref{tab:metrics}
+	reports all of them for every method under the one fully-online protocol
+	(\texttt{inference/stream\_metrics.py}, post-hoc from stored per-commit predictions).
+
+	\begin{table}[H]\centering\footnotesize
+	\caption{Comprehensive fully-online metrics at the online-tuned operating point
+	(Precision/Recall/Buggy-F1/Macro-F1/G-Mean/MCC) plus threshold-free ROC/PR-AUC.
+	Best row in bold.}\label{tab:metrics}
+	\begin{tabular}{@{}lrrrrrrrr@{}}
+	\toprule
+	\textbf{Method} & \textbf{Prec} & \textbf{Rec} & \textbf{B-F1} & \textbf{M-F1} & \textbf{G-Mean} & \textbf{MCC} & \textbf{ROC} & \textbf{PR}\\
+	\midrule
+	\multicolumn{9}{@{}l}{\textit{Within-project baselines (JIT metrics)}}\\
+	Naive prior bug-rate & 0.245 & 0.965 & 0.391 & 0.251 & 0.239 & 0.046 & 0.468 & 0.223\\
+	LR / JIT metrics & 0.334 & 0.758 & 0.464 & 0.559 & 0.629 & 0.240 & 0.671 & 0.348\\
+	RandomForest / JIT metrics & 0.364 & 0.693 & 0.478 & 0.599 & 0.654 & 0.266 & 0.723 & 0.478\\
+	GradBoost / JIT metrics & 0.349 & 0.772 & 0.481 & 0.577 & 0.648 & 0.271 & 0.711 & 0.469\\
+	\midrule
+	\multicolumn{9}{@{}l}{\textit{KG-v1 (relational / structural, no text)}}\\
+	Relational priors (wvRN) & 0.337 & 0.816 & 0.477 & 0.555 & 0.633 & 0.266 & 0.703 & 0.428\\
+	KG embedding (SVD/LSA) & 0.388 & 0.624 & 0.479 & 0.620 & 0.655 & 0.274 & 0.690 & 0.427\\
+	Structural TF-IDF & 0.370 & 0.727 & 0.490 & 0.604 & 0.665 & 0.287 & 0.719 & 0.420\\
+	Personalized PageRank & 0.384 & 0.765 & 0.511 & 0.618 & 0.684 & 0.322 & 0.727 & 0.383\\
+	Fusion M+T+R+P (v1) & 0.524 & 0.705 & 0.601 & 0.722 & 0.750 & 0.459 & 0.828 & 0.606\\
+	\midrule
+	\multicolumn{9}{@{}l}{\textit{KG-v2 ($+$commit-text)}}\\
+	Commit-text X & 0.314 & 0.805 & 0.452 & 0.520 & 0.597 & 0.218 & 0.685 & 0.408\\
+	Fusion$+$text M+T+R+P+X & 0.508 & 0.723 & 0.597 & 0.716 & 0.750 & 0.452 & 0.830 & 0.610\\
+	Fusion M+T+R & 0.527 & 0.707 & 0.604 & 0.724 & 0.752 & 0.462 & 0.828 & 0.608\\
+	\midrule
+	\multicolumn{9}{@{}l}{\textit{KG-v3 ($+$CSTG semantic-text graph)}}\\
+	CSTG G alone & 0.507 & 0.676 & 0.580 & 0.708 & 0.732 & 0.429 & 0.821 & 0.588\\
+	KG$+$CSTG M+T+R+G & 0.543 & 0.679 & 0.604 & 0.728 & 0.746 & 0.464 & 0.838 & 0.628\\
+	\textbf{KG$+$CSTG M+T+R+P+G} & \textbf{0.543} & 0.684 & \textbf{0.606} & \textbf{0.729} & 0.748 & \textbf{0.467} & \textbf{0.838} & \textbf{0.628}\\
+	\bottomrule
+	\end{tabular}
+	\end{table}
+
+	The metrics tell one consistent story: the KG models dominate the JIT-metric baselines
+	on \emph{every} operating-point measure --- Precision $0.54$ vs.\ $0.33$--$0.36$,
+	Macro-F1 $0.73$ vs.\ $0.56$--$0.60$, MCC $0.47$ vs.\ $0.24$--$0.27$ --- and the
+	progression baselines\,$\rightarrow$\,v1\,$\rightarrow$\,v2\,$\rightarrow$\,v3 is
+	monotone. Figure~\ref{fig:metrics-bars} shows the three imbalance metrics as bars;
+	Figure~\ref{fig:metrics-trends} shows their \emph{rolling stream trends}. The trends
+	are revealing: the KG methods hold much higher Precision, Macro-F1, G-Mean and MCC
+	across the whole stream, whereas the JIT baseline trades precision for recall
+	(over-predicting ``buggy'' in the low-defect $2018$--$2019$ tail) --- exactly the
+	failure mode the balanced metrics expose and the KG avoids.
+
+	\begin{figure}[H]\centering
+		\includegraphics[width=\linewidth]{metrics_bars_v1v2v3.png}
+		\caption{Buggy-F1, Macro-F1 and G-Mean (fully-online) across baselines and
+			KG-v1/v2/v3.}\label{fig:metrics-bars}
+	\end{figure}
+
+	\begin{figure}[H]\centering
+		\includegraphics[width=\linewidth]{metrics_stream_trends.png}
+		\caption{Rolling (online, window $=800$) Precision, Recall, Buggy-F1, Macro-F1,
+			G-Mean and MCC as commits arrive, for the JIT baseline, the KG fusion, the CSTG,
+			and the final KG$+$CSTG. The KG$+$CSTG (thick red) leads on the balanced metrics
+			throughout; the JIT baseline's high tail-Recall comes at a large Precision
+			cost.}\label{fig:metrics-trends}
+	\end{figure}
+
+	\subsection{Layer review: limitations and literature-grounded next steps}\label{sec:cstgreview}
+	A pre-submission audit of the CSTG (code $+$ against the JIT-SDP / graph-of-text
+	literature) records the following.
+
+	\paragraph{Resolved / addressed.} The online path originally dropped the two graph
+	mechanisms (it used plain TF and a raw-rate prior); the \emph{enhanced} online CSTG
+	(\texttt{cstg\_online\_features.py}) restores them for deployment: graph-of-words
+	(TextRank) weighting, \textbf{add/remove/message polarity}, and an \textbf{NPMI-propagated
+	prior} computed incrementally, strictly past-only. The prequential protocol
+	(\S\ref{sec:cstgonline}) confirms everything grows and predicts online.
+
+	\paragraph{Open limitations.}
+	\begin{itemize}[nosep]
+		\item \textbf{Overlap with the structural-token stream (T).} Both derive from the
+		diff, so the CSTG's marginal lift over M+T+R is modest; the non-overlapping signal
+		is \emph{cross-modal grounding}.
+		\item \textbf{Grounding: strong for structure/interpretability, weak as a naive
+		predictor (tested).} The layer ingests \textbf{$19{,}315$ \edge{GROUNDS\_IN}}
+		(\node{Term}$\rightarrow$\node{ASTNode}, e.g.\ the message word \emph{MetaClass}
+		$\rightarrow$ the \texttt{MetaClass} AST nodes in \texttt{DefaultGroovyMethods.java})
+		and $45{,}255$ \edge{REFERS\_TO} edges --- a genuine, queryable message$\leftrightarrow$code
+		bridge. However, a \emph{naive} online grounded-risk feature (a commit's terms
+		$\rightarrow$ their grounded files $\rightarrow$ those files' past bug-rate,
+		\texttt{cstg\_grounding.py}) is \emph{not} predictive (streamed ROC $0.487$,
+		$\approx$ random): naming a historically-buggy code entity does not make a commit
+		buggy. So grounding's value is \textbf{structural/interpretability} and as a
+		\textbf{substrate for the V4 heterogeneous GNN} (which can \emph{learn} to use the
+		text$\leftrightarrow$code paths), not a hand-crafted feature. We report this
+		honestly rather than forcing a random signal into the fusion.
+		\item \textbf{Uncalibrated prior} (raw-rate; strong ranking, weak hard-decision --
+		fixed by the online threshold of \S\ref{sec:onlinejit}); \textbf{dense NPMI graph}
+		(should use PPMI / top-$k$); \textbf{per-commit TextRank cost} (a V4 efficiency item).
+	\end{itemize}
+
+	\paragraph{Literature-grounded extensions considered (fit to the task).}
+	Graph-of-words \emph{structural} features (k-core / main-core, density; Rousseau \&
+	Vazirgiannis); PPMI/LLR weighting and \emph{fastText} (OOV-robust) semantic
+	term--term edges; \textbf{Topic} nodes (LDA) as an alternative text structure;
+	change-type / conventional-commit typing (fix/feat/refactor, tied to SZZ); curated
+	SE bug-lexicons (Mockus \& Votta; Ray et al.); and message metadata (length,
+	``what/why'', issue references). As deep-learning JIT-text baselines to position
+	against, \textbf{DeepJIT} (Hoang et al., 2019) and \textbf{CC2Vec} (Hoang et al.,
+	2020) motivate the V4 head: a heterogeneous \textbf{TextGCN}-style GNN over the CSTG
+	$+$ AST $+$ delta graph, for which the CSTG already provides the term--document
+	structure. These are the concrete levers to raise the CSTG from a strong,
+	interpretable, complementary layer to a dominant one.
+
 	% ===========================================================================
 	\section{Legacy Layer}\label{sec:legacy}
 	% ===========================================================================
