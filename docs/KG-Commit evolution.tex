@@ -1601,8 +1601,15 @@
 	\end{tabular}
 	\end{table}
 
-	\subsection{The semantic text layer (contribution)}\label{sec:v3text}
-	V3 promotes commit text from the V2 node-feature to a first-class graph layer
+	\subsection{The semantic text layer --- initial (shallow) version}\label{sec:v3text}
+	\emph{This subsection records V3's \textbf{first, shallow} text layer, kept to show
+	the motivation. It under-performs (Fusion$+$text-graph ROC $0.766$, below the $0.813$
+	text baseline); deepening it into the full \textbf{Commit Semantic-Text Graph}
+	(\S\ref{sec:cstg}) is what turns it into a contribution that beats the baseline
+	($0.827$) and lifts the online fusion. Read \S\ref{sec:cstg} for the final layer;
+	the table here is the ``before''.}
+
+	V3 first promotes commit text from the V2 node-feature to a first-class graph layer
 	(\texttt{build\_text\_layer.py}, \S\ref{sec:textlayer}): commit messages are parsed
 	into \node{Term} nodes --- natural-language lemmas and, via light NER, code
 	identifiers (camelCase / \texttt{Foo.bar()} / \texttt{CONST}) --- linked
@@ -2032,8 +2039,16 @@
 	mechanisms (it used plain TF and a raw-rate prior); the \emph{enhanced} online CSTG
 	(\texttt{cstg\_online\_features.py}) restores them for deployment: graph-of-words
 	(TextRank) weighting, \textbf{add/remove/message polarity}, and an \textbf{NPMI-propagated
-	prior} computed incrementally, strictly past-only. The prequential protocol
-	(\S\ref{sec:cstgonline}) confirms everything grows and predicts online.
+	prior} computed incrementally, strictly past-only. Two further enrichments were
+	\emph{implemented and measured} (\S\ref{sec:cstgfinal}): a \textbf{recency/bug-cache}
+	block --- the orthogonal, light, online signal that moves the fusion (PR-AUC
+	$0.606\!\rightarrow\!0.628$, and G-alone $0.535\!\rightarrow\!0.588$) --- and
+	\textbf{change-intent typing} (\node{Intent} nodes, $8{,}059$ \edge{HAS\_INTENT})
+	with a cross-modal \emph{intent--realisation consistency} score, which strengthens the
+	standalone layer and is retained as graph structure. A redundancy audit then dropped
+	the subsumed features (X$\subset$G, P$\subset$R) and the noisy \edge{REFERS\_TO}
+	edges. The prequential protocol (\S\ref{sec:cstgonline}) confirms everything grows and
+	predicts online.
 
 	\paragraph{Open limitations.}
 	\begin{itemize}[nosep]
@@ -2044,8 +2059,9 @@
 		predictor (tested).} The layer ingests \textbf{$19{,}315$ \edge{GROUNDS\_IN}}
 		(\node{Term}$\rightarrow$\node{ASTNode}, e.g.\ the message word \emph{MetaClass}
 		$\rightarrow$ the \texttt{MetaClass} AST nodes in \texttt{DefaultGroovyMethods.java})
-		and $45{,}255$ \edge{REFERS\_TO} edges --- a genuine, queryable message$\leftrightarrow$code
-		bridge. However, a \emph{naive} online grounded-risk feature (a commit's terms
+		--- a genuine, queryable message$\leftrightarrow$code bridge (the noisier
+		\edge{REFERS\_TO} \node{Term}$\rightarrow$\node{File} edges were pruned as
+		replication). However, a \emph{naive} online grounded-risk feature (a commit's terms
 		$\rightarrow$ their grounded files $\rightarrow$ those files' past bug-rate,
 		\texttt{cstg\_grounding.py}) is \emph{not} predictive (streamed ROC $0.487$,
 		$\approx$ random): naming a historically-buggy code entity does not make a commit
@@ -2058,18 +2074,36 @@
 		(should use PPMI / top-$k$); \textbf{per-commit TextRank cost} (a V4 efficiency item).
 	\end{itemize}
 
-	\paragraph{Literature-grounded extensions considered (fit to the task).}
-	Graph-of-words \emph{structural} features (k-core / main-core, density; Rousseau \&
+	\paragraph{Literature-grounded extensions (remaining).} Change-type typing and the
+	recency/bug-cache signal are \emph{done} (above); still open, as fit-to-task levers:
+	graph-of-words \emph{structural} features (k-core / main-core, density; Rousseau \&
 	Vazirgiannis); PPMI/LLR weighting and \emph{fastText} (OOV-robust) semantic
-	term--term edges; \textbf{Topic} nodes (LDA) as an alternative text structure;
-	change-type / conventional-commit typing (fix/feat/refactor, tied to SZZ); curated
-	SE bug-lexicons (Mockus \& Votta; Ray et al.); and message metadata (length,
-	``what/why'', issue references). As deep-learning JIT-text baselines to position
-	against, \textbf{DeepJIT} (Hoang et al., 2019) and \textbf{CC2Vec} (Hoang et al.,
-	2020) motivate the V4 head: a heterogeneous \textbf{TextGCN}-style GNN over the CSTG
-	$+$ AST $+$ delta graph, for which the CSTG already provides the term--document
-	structure. These are the concrete levers to raise the CSTG from a strong,
-	interpretable, complementary layer to a dominant one.
+	term--term edges; \textbf{Topic} nodes (LDA); expanded SE bug-lexicons (Mockus \&
+	Votta; Ray et al.); and message metadata (length, ``what/why''). As deep-learning
+	JIT-text baselines to position against, \textbf{DeepJIT} (Hoang et al., 2019) and
+	\textbf{CC2Vec} (Hoang et al., 2020) motivate the V4 head.
+
+	\subsection{V3 complete --- what V4 takes on}\label{sec:v4next}
+	V3 finalizes the \emph{KG design}: a provably-clean, fully-online, multimodal
+	commit graph (process $+$ AST $+$ delta $+$ CSTG) whose deployed fusion
+	(\textbf{M+T+R+G}) beats every baseline on the imbalanced operating-point metrics
+	(\S\ref{sec:metrics}). The graph schema is now considered \emph{frozen}. Two threads
+	are deferred to \textbf{V4}, which shifts focus from design to \emph{evidence and
+	scale}:
+	\begin{enumerate}[nosep]
+		\item \textbf{Heterogeneous GNN} (TextGCN/HGT-style) over the CSTG$+$AST$+$delta
+		graph --- the model built to \emph{learn} the cross-modal grounding paths the
+		hand-crafted features could not exploit --- plus the strengthening of the
+		scalability/efficiency argument (index-backed queries, bounded-memory streaming
+		state; the per-commit TextRank and NPMI-recompute are the targets).
+		\item \textbf{Cross-project reproducibility.} The method is project-agnostic and
+		the data is ready for \emph{all 15 ApacheJIT projects} (labels $+$ diffs $+$
+		metrics; 11/15 repos cloned). Turning the Groovy-specific pipeline into a
+		config-driven, per-project run (parameterised paths/filters, per-project Neo4j DB
+		or namespaced ids, per-project cache dirs, a \code{BASE\_COMMIT} heuristic, and
+		per-project parser-coverage handling) generalises the whole study --- the core V4
+		experimental programme.
+	\end{enumerate}
 
 	% ===========================================================================
 	\section{Legacy Layer}\label{sec:legacy}
