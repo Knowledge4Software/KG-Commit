@@ -45,7 +45,14 @@ ALPHA=0.85          # PPR damping
 PPR_ITERS=60
 
 # ── pull everything we need from the KG in a few passes ──────────────────────
-def load_kg():
+def load_kg(node_label="ASTNode", type_prop="ast_type"):
+    """Load core commit/file/dev graph + per-commit structural change-tokens.
+
+    The token stream is the ONLY channel through which the structural subgraph
+    reaches inference, so it is parametrized: the AST layer (default) reads
+    :ASTNode.ast_type; the v4 alternative subgraphs read :CFGNode/:DFGNode/
+    :PDGNode/:SEQNode.atype. Pass node_label=None for the 'no subgraph' (core-
+    only) variant -> empty token stream."""
     from neo4j import GraphDatabase
     d=GraphDatabase.driver(NEO4J_URI,auth=NEO4J_AUTH)
     def q(cypher):                       # execute_read auto-retries transient errors
@@ -60,9 +67,10 @@ def load_kg():
                           **{m:(r[m] if r[m] is not None else 0.0) for m in METRICS}}
     print(f"  commits: {len(commits)}")
     tokens=defaultdict(list)
-    for r in q("""MATCH (c:Commit {in_jit:true})-[r:ADDS|REMOVES|UPDATES|MOVES]->(a:ASTNode)
-        RETURN c.id AS id, type(r)+':'+coalesce(a.ast_type,'?') AS tok, count(*) AS n"""):
-        tokens[r["id"]].append((r["tok"], r["n"]))
+    if node_label:
+        for r in q(f"""MATCH (c:Commit {{in_jit:true}})-[r:ADDS|REMOVES|UPDATES|MOVES]->(a:{node_label})
+            RETURN c.id AS id, type(r)+':'+coalesce(a.{type_prop},'?') AS tok, count(*) AS n"""):
+            tokens[r["id"]].append((r["tok"], r["n"]))
     files=defaultdict(list)
     for r in q("""MATCH (c:Commit {in_jit:true})-[:MODIFIED|ADDED|DELETED]->(f:File)
         RETURN c.id AS id, f.id AS f"""):

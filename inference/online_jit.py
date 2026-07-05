@@ -40,7 +40,8 @@ from sklearn.feature_extraction.text import HashingVectorizer
 from sklearn.decomposition import TruncatedSVD
 from sklearn.utils.class_weight import compute_class_weight
 from sklearn.metrics import (roc_auc_score, average_precision_score, f1_score,
-                             matthews_corrcoef, brier_score_loss)
+                             matthews_corrcoef, brier_score_loss,
+                             precision_score, recall_score)
 import warnings; from sklearn.exceptions import ConvergenceWarning
 warnings.filterwarnings("ignore", category=ConvergenceWarning)
 import advanced_infer as ai, online_infer as oi
@@ -75,17 +76,25 @@ def _best_threshold(y, p):
     f1 = 2 * prec * rec / (prec + rec + 1e-12)
     return float(p[order][int(np.argmax(f1))])
 
-def online_f1(p, y, init=300, step=150):
-    """Prequential buggy-F1 with the decision threshold tuned ONLINE on the past
-    (re-tuned every `step` commits using only already-seen predictions)."""
-    y = np.asarray(y); yhat = np.zeros(len(y), int); thr = 0.5
+def online_decisions(p, y, init=300, step=150):
+    """Prequential hard labels: threshold tuned ONLINE on the past only (re-tuned
+    every `step` commits to maximise buggy-F1 on already-seen predictions). This
+    is the leakage-free deployment operating point at which all threshold-based
+    metrics (precision/recall/F1/G-mean/accuracy) are reported."""
+    p = np.asarray(p); y = np.asarray(y); yhat = np.zeros(len(y), int); thr = 0.5
     for i in range(len(y)):
         yhat[i] = int(p[i] >= thr)
         if i + 1 >= init and (i + 1) % step == 0:
             thr = _best_threshold(y[:i+1], p[:i+1])
-    return float(f1_score(y, yhat, zero_division=0))
+    return yhat
+
+def online_f1(p, y, init=300, step=150):
+    """Prequential buggy-F1 at the online-tuned operating point."""
+    y = np.asarray(y)
+    return float(f1_score(y, online_decisions(p, y, init, step), zero_division=0))
 
 def cum_metrics(y, p):
+    p = np.clip(np.asarray(p, float), 0.0, 1.0)   # guard float drift (e.g. 1.0000002)
     yh = (p >= 0.5).astype(int)
     out = dict(ROC_AUC=float("nan"), PR_AUC=float("nan"))
     if len(np.unique(y)) > 1:
@@ -95,8 +104,26 @@ def cum_metrics(y, p):
     return out
 
 def final_metrics(y, p):
-    """Cumulative metrics + the online-tuned buggy-F1 (for end-of-stream scoring)."""
-    cm = cum_metrics(y, p); cm["F1_online"] = online_f1(np.asarray(p), np.asarray(y))
+    """Full evaluation-metric suite for end-of-stream scoring. Threshold-free
+    ranking metrics (AUC/ROC, PR-AUC) plus the project's headline operating-point
+    metrics --- Precision, Recall, Buggy-F1, Macro-F1, G-Mean, Accuracy --- all
+    computed at the leakage-free ONLINE-tuned threshold (online_decisions)."""
+    y = np.asarray(y); p = np.clip(np.asarray(p, float), 0.0, 1.0)
+    cm = cum_metrics(y, p)                       # ROC_AUC, PR_AUC, F1@.5, MCC, Brier, Acc@.5
+    yhat = online_decisions(p, y)
+    prec = precision_score(y, yhat, pos_label=1, zero_division=0)
+    rec  = recall_score(y, yhat, pos_label=1, zero_division=0)      # buggy recall / sensitivity
+    spec = recall_score(y, yhat, pos_label=0, zero_division=0)      # benign recall / specificity
+    cm.update({
+        "F1_online": f1_score(y, yhat, zero_division=0),            # buggy-F1 (tuned)
+        "Precision": float(prec),
+        "Recall":    float(rec),
+        "Buggy_F1":  float(f1_score(y, yhat, pos_label=1, zero_division=0)),
+        "Macro_F1":  float(f1_score(y, yhat, average="macro", zero_division=0)),
+        "G_Mean":    float(np.sqrt(max(rec, 0.0) * max(spec, 0.0))),
+        "AUC":       cm["ROC_AUC"],                                 # alias (threshold-free)
+        "ACC":       float((yhat == y).mean()),                     # accuracy at tuned point
+    })
     return cm
 
 def load_stream_data():
