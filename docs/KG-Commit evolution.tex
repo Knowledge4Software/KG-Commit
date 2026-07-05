@@ -11,6 +11,7 @@
 \usepackage{booktabs}
 \usepackage{longtable}
 \usepackage{array}
+\usepackage{multirow}
 \usepackage{xcolor}
 \usepackage{enumitem}
 \usepackage{caption}
@@ -1052,7 +1053,7 @@
 			line), the same hard regime quantified in \S\ref{sec:cmp}.}\label{fig:v2traj}
 	\end{figure}
 
-	\subsection{Statistical comparison: V1 $\rightarrow$ V2}\label{sec:v2stat}
+	\subsection{\texorpdfstring{Statistical comparison: V1 $\rightarrow$ V2}{Statistical comparison: V1 to V2}}\label{sec:v2stat}
 	V2 changes the graph \emph{minimally and only where intended}: it cleans flag/
 	legacy artefacts and recovers 6 previously-unparseable files (1 via javalang,
 	5 via tree-sitter); the entire commit/AST/delta substance of V1 is preserved.
@@ -1089,7 +1090,7 @@
 		\end{tabular}
 	\end{table}
 	
-	\subsection{Performance comparison: V1 $\rightarrow$ V2}\label{sec:v2perf}
+	\subsection{\texorpdfstring{Performance comparison: V1 $\rightarrow$ V2}{Performance comparison: V1 to V2}}\label{sec:v2perf}
 	The only V2 change that can move the metrics is the new commit-text stream
 	\textbf{X}; the data-quality fixes do not alter inference (they touch flags and a
 	deprecated layer). We therefore compare the V1 fusion (M+T+R+P) against the V2
@@ -1581,7 +1582,7 @@
 	\code{ASTNode.file}, \code{ASTNode.value}, \code{Term.id/text} and \code{Commit.in\_jit}
 	turned those into index seeks and is a prerequisite for the V4 scalability work.
 
-	\subsection{Revised graph statistics (V2 $\rightarrow$ V3)}\label{sec:v3stat}
+	\subsection{\texorpdfstring{Revised graph statistics (V2 $\rightarrow$ V3)}{Revised graph statistics (V2 to V3)}}\label{sec:v3stat}
 	\begin{table}[H]\centering\small
 	\caption{Graph statistics, V2 vs.\ V3 (only the deliberately-changed quantities
 	differ; total \node{ASTNode} count is unchanged --- ghosts are flagged, not
@@ -1877,7 +1878,7 @@
 			$\approx$ TF-IDF; the win is the full structured representation.}\label{fig:cstg-abl}
 	\end{figure}
 
-	\subsection{The final methodology: full KG $+$ CSTG, online}\label{sec:cstgfinal}
+	\subsection{\texorpdfstring{The final methodology: full KG $+$ CSTG, online}{The final methodology: full KG + CSTG, online}}\label{sec:cstgfinal}
 	The deployed model fuses the \emph{whole} KG with the CSTG, prequentially, with all
 	learners online-compatible (\texttt{online\_jit.py}). The CSTG stream (\textbf{G})
 	lifts the KG fusion (M+T+R+P) from ROC $0.828$ / PR-AUC $0.606$ /
@@ -2779,6 +2780,156 @@
 
 	\input{figures/v4/tab_fusion_bysize.tex}
 
+	\subsection{Selecting five inference methods for the final study}\label{sec:v4-select5}
+	The two research questions --- \emph{which subgraph?} and \emph{which inference
+	method?} --- are answered together by one table whose rows are inference methods
+	and whose columns are a family of knowledge graphs of increasing richness. This
+	requires committing to a small set of inference methods that (i)~are
+	\emph{typical} of graph/KG inference, (ii)~use the KG's structure and modelling
+	as fully as possible, and (iii)~apply uniformly to \emph{every} graph in the
+	family (so each is a valid row). We choose the \textbf{five canonical
+	graph-inference paradigms}:
+	\begin{center}\small
+	\begin{tabular}{lll}
+	\toprule
+	Method & Paradigm & Structure exploited \\
+	\midrule
+	RN  & collective classification (wvRN) & label-weighted 1-hop neighbourhood \\
+	PPR & random walk with restart          & multi-hop connectivity to class seeds \\
+	LP  & label propagation                 & global label diffusion over edges \\
+	DW  & random-walk node embedding (DeepWalk) & unsupervised node geometry \\
+	KGE & knowledge-graph embedding (DistMult) & typed (commit,\,rel,\,hub) relations \\
+	\bottomrule
+	\end{tabular}
+	\end{center}
+
+	\paragraph{Why these five.} They map one-to-one onto the recognised families of
+	graph and knowledge-graph inference, so their ``typicality'' is beyond dispute;
+	each reads a \emph{different, complementary} facet of the structure
+	(neighbourhood, walk, diffusion, node embedding, typed-edge embedding), which
+	both maximises use of the modelling and makes their fusion strong; and, crucially,
+	all five are graph \emph{algorithms} that run unchanged on any graph, so they can
+	be a common set of rows across the whole column family. In contrast, the
+	feature-based channels that were individually strongest in the ablation ---
+	structural TF-IDF ($T$) and the CSTG channel ($G$) --- are \emph{not} admissible
+	as rows: $T$ ignores topology (a bag-of-token classifier, not graph inference),
+	and $G$ is specific to the CSTG layer and undefined for the Core-only column.
+	Their signal is instead \textbf{absorbed by the five methods through the graph
+	itself}: on a graph whose hubs include AST change-tokens the walks and embeddings
+	traverse the structural signal, and on the final graph, whose hubs additionally
+	include \emph{CSTG term nodes} (the $(\text{Commit})\!\rightarrow\!(\text{Term})$
+	\edge{MENTIONS} edges), they traverse the semantic signal as well. Fixing the five
+	methods and \emph{enriching the graph} across the columns is therefore both the
+	fairer and the higher-performing design: the richest graph (the final KG) gives
+	every method its best result, and the five-method fusion on it is strongest.
+
+	\paragraph{The graph family (columns).} We evaluate the five methods on six
+	knowledge graphs of increasing richness, all sharing the Core relational layer
+	(commit\,--\,file\,--\,developer):
+	\emph{Core}; \emph{Core$+$AST}; \emph{Core$+$CFG}; \emph{Core$+$DFG};
+	\emph{Core$+$PDG}; and the \emph{final} \emph{Core$+$AST$+$CSTG}. Reading a row
+	shows a method's sensitivity to graph richness (the \emph{which-subgraph} RQ);
+	reading a column shows which method wins on a given graph (the
+	\emph{which-method} RQ).
+
+	\paragraph{Two auxiliary decisions.} First, the deployed \emph{final Fusion}
+	combines the five methods on the final KG and \emph{may} append the non-graph JIT
+	metrics ($M$) as a single auxiliary feature; from the ablation $M$ contributes
+	little, so we report both the graph-only five-method fusion and the
+	fusion$+M$ variant and prefer the former unless $M$ measurably helps. Second, the
+	commit-text channel ($X$) is \textbf{removed entirely} from the methodology and
+	from all future work; it is disabled throughout this study and its remaining
+	traces in the codebase are to be deleted.
+
+	\subsection{Final experiments: five methods across the graph family}\label{sec:v4-finalexp}
+	We run the five canonical graph-inference methods online (prequentially) on the
+	six-graph family and report all seven metrics
+	(\code{inference/run\_final\_experiments.py}). Tables~\ref{tab:v4-final-precision}--\ref{tab:v4-final-acc}
+	give one table per metric --- rows are methods, columns are the six graphs, and the
+	best method per graph is in \textbf{bold}. Together they answer both research
+	questions in one place: reading a row shows a method's response to graph richness,
+	reading a column shows the best method on a given graph.
+
+	\paragraph{What the tables show.} Graph richness helps the informative methods:
+	for PPR, LP and the embeddings the metrics rise from Core to the final
+	\emph{Core$+$AST$+$CSTG} graph, and \textbf{PPR on the final graph is the best
+	single (method, graph) cell} (Buggy-F1 $\approx0.555$, AUC $\approx0.78$,
+	G-Mean $\approx0.72$). PPR is the strongest method overall, with LP and the
+	DeepWalk/DistMult embeddings close behind; the pure relational neighbour (RN) is
+	flat and slightly prefers the Core graph, since a one-hop label vote is diluted
+	rather than helped by structural and semantic hubs. These five methods are the
+	inputs to the deployed fusion on the final KG.
+
+	\input{figures/v4/tab_final_bymetric.tex}
+
+	\paragraph{Online-evaluation streams.} Because the protocol is prequential, each
+	metric has a trajectory over the commit stream. We produce the full set in the
+	companion notebook (\code{experiments/notebooks/final\_experiments.ipynb}): a
+	\emph{by-method} view (five figures $\times$ seven metric panels $=35$ streams,
+	trends~$=$~graphs) and a \emph{by-graph} view (six figures $\times$ seven panels
+	$=42$ streams, trends~$=$~methods). Figure~\ref{fig:v4-final-streams} is the
+	representative by-graph panel for the final KG: the method ordering (PPR ahead of
+	LP, the embeddings, and RN) holds across the entire stream and across all seven
+	metrics, so the conclusions are not artefacts of a single operating point.
+
+	\begin{figure}[H]
+		\centering
+		\includegraphics[width=\linewidth]{v4/final/fig_final_bygraph_final}
+		\caption{Online-evaluation streams on the final \emph{Core$+$AST$+$CSTG} graph:
+		each panel is one of the seven metrics over the commit stream, with the five
+		methods as trends (PPR in bold). PPR leads throughout on the balanced metrics.}
+		\label{fig:v4-final-streams}
+	\end{figure}
+
+	\subsection{Choosing the final fusion of the five methods}\label{sec:v4-finalfusion}
+	Having fixed the five methods and the final graph, we choose how to \emph{fuse}
+	them (\code{inference/run\_final\_fusion.py}). We stack the five methods'
+	probabilities with a prequential logistic regression and evaluate \textbf{all
+	$2^5-1=31$ combinations} on the final KG (Table~\ref{tab:v4-final-fusion-ablation}).
+	The final fusion is picked to balance \emph{load} (fewer methods, cheaper online)
+	against \emph{performance}, prioritising the two class-balanced metrics
+	Macro-F1 and G-Mean: we take the smallest combination whose
+	$(\text{Macro-F1}+\text{G-Mean})/2$ is within $0.005$ of the best. This selects
+	\textbf{$F=$~RN$+$PPR} --- the relational-neighbour and random-walk methods --- with
+	Macro-F1~$0.670$ and G-Mean~$0.731$; adding the remaining three methods does not
+	improve the balance (the five-method fusion reaches only $0.695$ versus $F$'s
+	$0.701$), so two methods suffice.
+
+	\input{figures/v4/tab_final_fusion_ablation.tex}
+
+	\begin{figure}[H]
+		\centering
+		\includegraphics[width=\linewidth]{v4/final/fig_final_fusion_part1}
+		\caption{Online-evaluation streams of the chosen fusion $F=$~RN$+$PPR (bold)
+		against the five single methods, one panel per metric. $F$ tracks at or above
+		the best single method throughout.}
+		\label{fig:v4-final-fusion-part1}
+	\end{figure}
+
+	\paragraph{Adding the CSTG channel and the JIT metrics.} Finally we ask whether
+	the explicit CSTG semantic channel ($G$) or the non-graph JIT metrics ($M$) add
+	anything on top of $F$ (Table~\ref{tab:v4-final-fusion-gm},
+	Figure~\ref{fig:v4-final-fusion-part2}). \textbf{Adding $G$ helps markedly} ---
+	Macro-F1 $0.670\!\to\!0.729$, AUC $0.787\!\to\!0.844$, Buggy-F1 $0.571\!\to\!0.621$
+	--- even though the final graph already carries CSTG term-hubs, because the
+	explicit semantic-text classifier captures signal the walks do not fully exploit
+	through topology alone. \textbf{Adding $M$ alone \emph{hurts}} (Macro-F1 drops to
+	$0.648$) and contributes nothing over $G$ ($F{+}G{+}M\approx F{+}G$). The deployed
+	model is therefore the purely graph-native \textbf{$F+G=$~RN$+$PPR$+$CSTG}, without
+	the non-graph JIT metrics.
+
+	\input{figures/v4/tab_final_fusion_gm.tex}
+
+	\begin{figure}[H]
+		\centering
+		\includegraphics[width=\linewidth]{v4/final/fig_final_fusion_part2}
+		\caption{Online-evaluation streams of $F$, $F{+}G$, $F{+}M$ and $F{+}G{+}M$,
+		one panel per metric. $F{+}G$ and $F{+}G{+}M$ track together at the top;
+		$F{+}M$ is lowest on Macro-F1 and AUC --- the non-graph metrics add noise, not
+		signal.}
+		\label{fig:v4-final-fusion-part2}
+	\end{figure}
+
 	\subsection{Conclusion}\label{sec:v4-concl}
 	Under a fair, identical online protocol with text and the semantic-text
 	subgraph disabled, the \textbf{AST delta-subgraph is the strongest structural
@@ -2786,17 +2937,43 @@
 	deployed Fusion model and on the direct structural-token signal, while every
 	structural layer improves on the core. Across the seven headline metrics and
 	across five additional graph-native inference methods, no alternative subgraph
-	overturns this ordering. Finally, a comprehensive fusion ablation over all
-	combinations of ten inference methods selects a compact, \textbf{purely
-	graph-native final Fusion $=R+T+G$} (relational priors, AST structural change,
-	and CSTG semantics) that improves on the previous metrics-inclusive fusion while
-	discarding the non-graph JIT metrics. This justifies the
+	overturns this ordering. A comprehensive fusion ablation over all combinations of
+	ten inference methods selects a compact, \textbf{purely graph-native final Fusion}
+	(relational, AST structural, and CSTG semantic evidence) that improves on the
+	previous metrics-inclusive fusion while discarding the non-graph JIT metrics.
+	The final study (Sections~\ref{sec:v4-finalexp}--\ref{sec:v4-finalfusion}) fixes
+	the five canonical graph-inference methods and evaluates them across the six-graph
+	family, confirming that graph richness improves inference and that the final KG is
+	best; a $31$-combination fusion ablation then selects the parsimonious
+	\textbf{$F=$~RN$+$PPR}, and adding the CSTG channel yields the deployed, purely
+	graph-native final model \textbf{$F+G=$~RN$+$PPR$+$CSTG} --- which drops the
+	non-graph JIT metrics (they are shown to \emph{hurt}) yet reaches Macro-F1~$0.729$,
+	G-Mean~$0.766$ and AUC~$0.844$. This justifies the
 	choice of the AST representation as the methodology's structural foundation ---
 	on top of which the semantic-text layer (CSTG) is then added. All artefacts are
 	reproducible: the per-layer builds (\code{build\_subgraph\_online\_kg.py}), the
-	evaluation (\code{inference/run\_subgraph\_rq.py}), the tables/figures
-	(\code{inference/make\_subgraph\_tables.py}, \code{make\_subgraph\_figures.py})
-	and the results notebook
-	(\code{experiments/notebooks/subgraph\_ablation\_v4.ipynb}).
+	evaluations (\code{inference/run\_subgraph\_rq.py},
+	\code{run\_final\_experiments.py}, \code{run\_final\_fusion.py}), the tables and
+	figures (\code{inference/make\_subgraph\_tables.py},
+	\code{make\_final\_experiments\_report.py}) and the results notebooks
+	(\code{experiments/notebooks/subgraph\_ablation\_v4.ipynb},
+	\code{final\_experiments.ipynb}).
+
+	\subsection{For the final paper}\label{sec:v4-paper}
+	The Groovy results instantiate the \texttt{Groovy} block of the paper's RQ3
+	evaluation matrix (Table~\ref{tab:massive_evaluation_matrix_groovy}). Rows are the
+	five graph-inference methods; column groups follow the additive KG-Commit
+	progression --- \textbf{V1} (Core), \textbf{V2} subgraph architectures
+	(AST, CFG, DFG, PDG, each on Core), and \textbf{V3} (the full multi-layer
+	Core$+$AST$+$CSTG) --- each reporting precision (P), recall (R), buggy $F_1$,
+	G-mean (G) and AUC. The values are the cumulative online (prequential) scores
+	from \code{inference/run\_final\_experiments.py}. Only the \texttt{Groovy} project
+	is filled here; the remaining projects of the full paper table are left out
+	entirely (no placeholder rows). The trend across a row is the intended one: for
+	the stronger methods (PPR, LP, the embeddings) the metrics improve from Core
+	through the subgraph layers to the V3 Core$+$AST$+$CSTG graph, where
+	\textbf{PPR} attains the best cell (buggy $F_1=.55$, G$=.72$, AUC$=.78$).
+
+	\input{figures/v4/tab_paper_groovy.tex}
 
 \end{document}
