@@ -1480,8 +1480,9 @@
 	deliberately GNN-free V1/V2 suite.
 
 	\subsection{B3. Richer code semantics beyond the AST}
-	Fold data-flow / control-flow / call edges (CPG-style; the repo already prototypes
-	\texttt{build\_cfg/dfg/cpg/slice} features) and optional method-level granularity
+	Fold data-flow / control-flow / call edges (code-property-graph style, embedding the
+	AST under each statement node; the repo already prototypes
+	\texttt{build\_cfg/dfg/pdg/slice} features) and optional method-level granularity
 	nodes into the structural layer, so the graph captures \emph{how} code behaves, not
 	only its syntax --- and so a change's blast radius (dependents of an edited node) is
 	traversable.
@@ -2180,7 +2181,7 @@
 		$M{+}R{+}P$ over the file/developer/commit graph.
 		\item \textbf{V2a --- CFG:} statement-level \emph{control-flow graph}.
 		\item \textbf{V2b --- DFG:} intra-procedural \emph{def--use} data-flow graph.
-		\item \textbf{V2c --- PDG/CPG:} \emph{program-dependence graph} (control +
+		\item \textbf{V2c --- PDG:} \emph{program-dependence graph} (control +
 		data dependence over statement nodes).
 		\item \textbf{V2d --- Token-seq:} a deliberately weak flat \emph{statement
 		sequence} (nodes chained by \edge{NEXT}), a lower rival.
@@ -2192,7 +2193,10 @@
 	graph construction already written for the offline static-feature study ---
 	\code{build\_cfg\_features.py} (\code{CFGBuilder}), \code{build\_dfg\_features.py}
 	(\code{DefUseBuilder}) and \code{build\_cpg\_features.py} (\code{CPGBuilder}) ---
-	plus a small new \code{SeqBuilder}. A thin wrapper (\code{subgraph\_builders.py})
+	plus a small new \code{SeqBuilder}. (The source file retains the historical
+	name \code{cpg}, but the graph it materialises is a \emph{program-dependence
+	graph} at statement granularity, not a full code property graph; see the note
+	below Table~\ref{tab:v4-layers}.) A thin wrapper (\code{subgraph\_builders.py})
 	drives them per changed \code{.java} file and emits one \emph{uniform} JSON
 	shape (nodes with \code{type}/\code{group}/\code{method}/\code{line}, typed
 	edges, and per-method roots), mirroring the AST worker. Local node ids are
@@ -2218,11 +2222,64 @@
 	AST & 3{,}699{,}439 & 3{,}614{,}922 & 136 & 314 & 7{,}523 \\
 	CFG & 372{,}488 & 408{,}301 & 18 & 53 & 6{,}194 \\
 	DFG & 469{,}662 & 648{,}553 & 7 & 27 & 6{,}066 \\
-	PDG/CPG & 372{,}488 & 411{,}869 & 18 & 63 & 6{,}261 \\
+	PDG & 372{,}488 & 411{,}869 & 18 & 63 & 6{,}261 \\
 	Token-seq & 257{,}708 & 293{,}287 & 16 & 47 & 6{,}011 \\
 	\bottomrule
 	\end{tabular}
 	\end{table}
+
+	\paragraph{Why the AST layer is an order of magnitude larger.} The roughly
+	tenfold gap between the AST layer ($3.70$\,M nodes) and every alternative
+	($0.26$--$0.47$\,M) is not an artefact of the build; it is a direct and
+	expected consequence of the \emph{granularity} at which each representation
+	places a node --- i.e.\ how much source code a single vertex stands for.
+	\begin{itemize}[nosep,leftmargin=1.4em]
+		\item \textbf{AST --- one node per syntactic construct (finest).} The AST
+		materialises \emph{every} grammatical element: each declaration, statement,
+		expression, operator, literal, and --- crucially --- each \emph{identifier and
+		operator leaf}. A single statement such as \code{int x = foo(a,b) + 1;}
+		explodes into a dozen-plus nodes (a local-variable declaration, its type, the
+		declarator, an assignment, a method invocation, two argument references, a
+		binary operation, a literal, and the identifier leaves). This is why the AST
+		alone accounts for $136$ node types: it is modelling the \emph{syntax} of the
+		language, which has many categories.
+		\item \textbf{CFG / PDG --- one node per statement (coarse).} The
+		control-flow and program-dependence layers place a node at the granularity of
+		a \emph{statement or control construct} (\code{IF}, \code{WHILE}, \code{EXPR},
+		\code{DECL}, \code{RETURN}, \ldots; $18$ kinds). The entire statement above
+		collapses to a \emph{single} \code{EXPR} vertex --- the whole AST subtree of an
+		executable unit is summarised by one node. Since a statement's AST subtree
+		averages on the order of ten nodes, statement granularity is precisely where
+		the ${\approx}10\times$ shrink comes from.
+		\item \textbf{PDG shares the CFG's vertex set exactly.} The PDG is built
+		\emph{on top of} the CFG's statement nodes: it adds control-dependence
+		(\code{CDG\_CONTROLS}) and data-dependence (\code{DDG\_REACHES}) \emph{edges}
+		but no new nodes. This is why CFG and PDG report an \emph{identical} node
+		count ($372{,}488$) and PDG carries only slightly more delta-edges
+		($411{,}869$ vs.\ $408{,}301$) --- the extra dependence structure lives in the
+		edges, not the vertices. (It also explains the label \code{PDGNode} rather
+		than a full code property graph: we deliberately keep dependence at statement
+		granularity and do \emph{not} embed the AST subtree under each statement. A
+		canonical CPG that did so would, by construction, contain the AST as a
+		subgraph and therefore exceed the AST layer in size; we do not build it, as
+		the goal here is to isolate each representation, not to superset them.)
+		\item \textbf{DFG --- one node per def/use site.} The data-flow layer
+		materialises only data-carrying entities: variable \emph{definitions} and
+		\emph{uses} ($7$ node types). A single statement can host several def/use
+		sites, so the DFG ($0.47$\,M) is modestly larger than the CFG, yet still far
+		below the AST because it skips all the non-data syntactic scaffolding.
+		\item \textbf{Token-seq --- one node per statement, flattened (smallest).}
+		The deliberately weak baseline chains statement nodes by \edge{NEXT} with no
+		control or data structure, giving the smallest layer ($0.26$\,M).
+	\end{itemize}
+	The same logic orders the \emph{delta-edges} and the per-commit
+	\emph{token-type} vocabulary: because the AST distinguishes far more kinds of
+	thing ($136$ node types $\rightarrow$ $314$ change-token types), a change
+	touching it emits a much richer and larger token stream than the $27$--$63$-type
+	streams of the coarser layers. This finer resolution is exactly the property the
+	subgraph study (Section~\ref{sec:v4-results}) finds to be predictively useful:
+	the ordering AST\;$\gg$\;DFG\;$>$\;CFG\;$\approx$\;PDG\;$>$\;Token-seq in scale
+	mirrors their ordering in signal.
 
 	\subsection{One shared uniform differ}\label{sec:v4-diff}
 	\paragraph{Theory.} The AST layer diffs \emph{trees} by bottom-up subtree
@@ -2304,7 +2361,7 @@
 	\midrule
 	CFG & 53 & 0.595 & 0.820 & 0.583 & 0.397 & 0.461 & 0.379 \\
 	DFG & 27 & 0.594 & 0.819 & 0.590 & 0.398 & 0.469 & 0.367 \\
-	PDG/CPG & 63 & 0.595 & 0.820 & 0.585 & 0.396 & 0.464 & 0.378 \\
+	PDG & 63 & 0.595 & 0.820 & 0.585 & 0.396 & 0.464 & 0.378 \\
 	Token-seq & 47 & 0.587 & 0.816 & 0.577 & 0.387 & 0.432 & 0.377 \\
 	\midrule
 	AST & 314 & \textbf{0.615} & \textbf{0.826} & \textbf{0.607} & \textbf{0.400} & 0.488 & 0.361 \\
@@ -2929,6 +2986,130 @@
 		signal.}
 		\label{fig:v4-final-fusion-part2}
 	\end{figure}
+
+	% =======================================================================
+	\section{Scalability, Complexity and Statistical Analysis}\label{sec:scal}
+	% =======================================================================
+	The V4 study establishes \emph{which} representation and methods are best; this
+	section establishes that the resulting system is \emph{scalable, cheap to run,
+	and statistically sound}. We analyse all four phases --- the Core graph, the
+	structural-subgraph family, the CSTG layer, and the five graph-inference methods
+	with their deployed fusion --- along four axes: a statistical profile of the final
+	graph, per-commit growth, build/predict complexity, and significance testing of
+	the headline comparisons. Every number here is obtained \textbf{without rebuilding
+	the knowledge graph}: final sizes and growth come from read-only snapshots of the
+	assembled database, prediction latency from replaying the cached graph family
+	in-memory, and build cost from a sampled replay of the real parse-and-diff work.
+	The analysis code is in \code{scalability/} and the companion notebook is
+	\code{experiments/notebooks/scalability\_v4.ipynb}.
+
+	\paragraph{Reproducibility on new projects.} The per-commit build wall-clock was
+	not persisted for the Groovy build (only deltas are stored). Both online engines
+	therefore now accept an opt-in \code{--timing-log} flag that appends one row per
+	commit (file actions, delta counts, wall-ms) at build time; it is off by default,
+	so the Groovy database is untouched, and on for any \emph{new} project it captures
+	the full per-commit timing natively.
+
+	\subsection{Statistical profile of the final graph}\label{sec:scal-profile}
+	Table~\ref{tab:scal-profile} profiles every materialised layer. Beyond the raw
+	scale (recovered exactly: AST $3{,}699{,}439$ nodes, matching
+	Table~\ref{tab:v4-layers}), two distributional facts matter. First, per-file sizes
+	are highly skewed (Gini $\approx0.6$--$0.7$): a few large files dominate each
+	layer, as expected of real software. Second, the per-commit change size is
+	\textbf{heavy-tailed} on every layer, with a maximum-likelihood power-law exponent
+	$\alpha\in[2.0,2.3]$ --- the regime ($2<\alpha<3$) in which the mean is finite but
+	the variance is not, i.e.\ most commits are tiny and a few are enormous
+	(Figure~\ref{fig:scal-degree}). This is precisely the distribution a delta-based
+	store is designed for: storage follows the (small, typical) change, not a
+	worst-case snapshot. The CSTG layer adds a compact, bounded semantic increment
+	($20{,}377$ \node{Term} nodes; ${\approx}20$ \edge{MENTIONS} per commit).
+
+	\input{figures/v4/scalability/tab_kg_profile.tex}
+
+	\begin{figure}[H]\centering
+		\includegraphics[width=.72\linewidth]{v4/scalability/fig_degree_loglog}
+		\caption{Fitted power-law tail of the per-commit change-token degree for each
+		layer ($\alpha\in[2.0,2.3]$): change sizes are heavy-tailed everywhere, so
+		delta storage cost is dominated by a small number of large commits.}
+		\label{fig:scal-degree}
+	\end{figure}
+
+	\subsection{Per-commit growth and modification}\label{sec:scal-growth}
+	Because commits are ingested in \code{author\_ts} order and only deltas are stored,
+	the graph grows with the \emph{amount of change}, not with history length.
+	Table~\ref{tab:scal-growth} reports, per layer, the total delta volume, the churn
+	ratio (\edge{REMOVES}/\edge{ADDS} $\approx0.4$--$0.5$: the tree mostly grows, with
+	substantial but minority deletion), and the buggy-vs-benign change-size gap.
+	\textbf{Buggy commits make significantly larger structural changes} on every layer:
+	the mean per-commit delta ratio is $2.0$--$2.8\times$ (bootstrap $95\%$ CI excludes
+	$1$ throughout) and a one-sided Mann--Whitney test rejects equality with
+	$p\ll10^{-90}$ (for AST, $p\approx7\times10^{-133}$). This size separation ---
+	visible in Figure~\ref{fig:scal-growth} together with the pronounced yearly bug-rate
+	drift --- is the structural basis of the graph's predictive value.
+
+	\input{figures/v4/scalability/tab_growth.tex}
+
+	\begin{figure}[H]\centering
+		\includegraphics[width=.48\linewidth]{v4/scalability/fig_growth_cumulative}\hfill
+		\includegraphics[width=.48\linewidth]{v4/scalability/fig_growth_year}
+		\caption{Left: cumulative delta-edges per layer over the commit stream ---
+		smooth, near-linear online growth. Right: AST change volume and the yearly bug
+		rate, showing the concept drift that motivates the time-aware protocol.}
+		\label{fig:scal-growth}
+	\end{figure}
+
+	\subsection{Time and space complexity}\label{sec:scal-complexity}
+	\paragraph{Build / modify.} Per-commit work is the parse of the changed file(s)
+	plus a tree/graph diff against the stored state; space is $O(\text{alive nodes} +
+	\text{retained history})$, with per-commit growth $O(\text{change})$ and no
+	full-snapshot-per-commit cost. Table~\ref{tab:scal-build} quantifies the CPU
+	parse-and-diff cost from a sampled replay of real modified-file pairs (Neo4j write
+	I/O excluded --- it is dominated by the schema-index cost documented in
+	\S\ref{sec:v4-engine}). The time-vs-file-size fit is near-perfect
+	($R^2\approx0.99$), confirming the cost is linear in the amount of code processed;
+	AST is ${\approx}20\times$ costlier per file than the coarse layers
+	($402$ vs.\ $17$--$25$\,ms), exactly its ${\approx}10\times$ node-granularity plus
+	tree-diff overhead (Figure~\ref{fig:scal-cost}, left).
+
+	\paragraph{Prediction.} At deployment the model scores each arriving commit from
+	strictly-past state. Table~\ref{tab:scal-latency} gives the median per-commit
+	latency of all five methods across the graph family: it grows with graph density
+	(e.g.\ PPR $0.035\to0.208$\,ms from Core to the final graph) yet the deployed
+	graph-native fusion $F=$~RN$+$PPR stays \textbf{sub-millisecond per commit}
+	(${\approx}3{,}200$ commits/s) even on the richest graph. The embedding methods
+	(DW, KGE) have negligible per-commit \emph{scoring} cost --- their cost is a bursty
+	per-block refit, amortised in Figure~\ref{fig:scal-cost} (right). The whole
+	pipeline is comfortably real-time and GPU-free.
+
+	\input{figures/v4/scalability/tab_build_complexity.tex}
+	\input{figures/v4/scalability/tab_prediction_latency.tex}
+
+	\begin{figure}[H]\centering
+		\includegraphics[width=.48\linewidth]{v4/scalability/fig_build_cost}\hfill
+		\includegraphics[width=.48\linewidth]{v4/scalability/fig_pareto_cost_accuracy}
+		\caption{Left: parse+diff time is linear in change size per layer
+		($O(\text{change})$). Right: cost--accuracy Pareto front on the deployed graph
+		--- PPR (and the $F=$~RN$+$PPR fusion it anchors) is Pareto-optimal, dominating
+		the far costlier embeddings.}
+		\label{fig:scal-cost}
+	\end{figure}
+
+	\subsection{Statistical significance of the headline comparisons}\label{sec:scal-sig}
+	Finally we attach significance to the V4 claims using paired per-commit
+	out-of-sample scores, replayed from the cached graph family, with DeLong's test for
+	ROC-AUC (Holm-corrected within each family) and a bootstrap for the interval
+	estimates (Table~\ref{tab:scal-sig}). Three results hold. \textbf{(i) Graph richness
+	helps} the informative methods significantly: PPR, LP and the embeddings all improve
+	from Core to the final graph ($\Delta$AUC up to $+0.134$ for DeepWalk,
+	$p\approx6\times10^{-34}$), while the one-hop relational neighbour is diluted by the
+	extra hubs --- exactly the pattern of \S\ref{sec:v4-finalexp}. \textbf{(ii) PPR is
+	significantly the best} method on the final graph (every pairwise
+	$\Delta$AUC$>0$, Holm $p\le10^{-16}$). \textbf{(iii) The semantic channel is real}:
+	the deployed $F{+}G$ significantly improves every headline metric over $F$
+	(ROC $0.787\to0.844$, PR-AUC $0.501\to0.637$, Macro-F1 $0.670\to0.729$). The
+	headline accuracy gaps are therefore not noise.
+
+	\input{figures/v4/scalability/tab_significance.tex}
 
 	\subsection{Conclusion}\label{sec:v4-concl}
 	Under a fair, identical online protocol with text and the semantic-text

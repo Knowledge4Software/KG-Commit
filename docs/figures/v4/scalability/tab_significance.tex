@@ -1,0 +1,35 @@
+% Auto-generated -- do not edit by hand.
+\begin{table}[t]
+\centering
+\caption{Statistical significance of the headline V4 comparisons. Rows in the
+first two blocks use paired per-commit out-of-sample scores: $\Delta$AUC is the
+ROC-AUC difference and $p$ is DeLong's paired test, Holm-corrected within each
+block. The last block reports the deployed semantic-channel effect (F$+$G vs.\ F)
+as the change in each headline metric from the final fusion run
+(\code{run\_final\_fusion.py}).}
+\label{tab:scal-sig}
+\begin{tabular}{lrl}
+\toprule
+Comparison & $\Delta$ & $p$ (Holm) / value \\
+\midrule
+\multicolumn{3}{@{}l}{\textit{Graph richness helps (final graph vs.\ Core), $\Delta$AUC}}\\
+RN: final $>$ Core & -0.049 & 9e-6 \\
+PPR: final $>$ Core & .051 & 3e-8 \\
+LP: final $>$ Core & .048 & 1e-6 \\
+DW: final $>$ Core & .134 & 6e-34 \\
+KGE: final $>$ Core & .084 & 1e-12 \\
+\midrule
+\multicolumn{3}{@{}l}{\textit{Best method on the final graph, $\Delta$AUC}}\\
+PPR $>$ RN & .133 & 2e-36 \\
+PPR $>$ LP & .044 & 2e-18 \\
+PPR $>$ DW & .070 & 3e-16 \\
+PPR $>$ KGE & .067 & 1e-21 \\
+\midrule
+\multicolumn{3}{@{}l}{\textit{Deployed semantic channel F$+$G vs.\ F}}\\
+F+G $>$ F (ROC-AUC) & .057 & .787$\to$.844 \\
+F+G $>$ F (PR-AUC) & .136 & .501$\to$.637 \\
+F+G $>$ F (Macro-F1) & .058 & .670$\to$.729 \\
+F+G $>$ F (G-Mean) & .034 & .731$\to$.766 \\
+\bottomrule
+\end{tabular}
+\end{table}

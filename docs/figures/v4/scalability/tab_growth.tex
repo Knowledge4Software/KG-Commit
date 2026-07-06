@@ -1,0 +1,21 @@
+% Auto-generated -- do not edit by hand.
+\begin{table}[t]
+\centering
+\caption{Per-commit growth and modification statistics recovered from the online
+delta stream. \emph{Churn} is \edge{REMOVES}/\edge{ADDS}; buggy/benign columns are
+mean per-commit delta-edges; the ratio carries a bootstrap $95\%$ CI and a
+Mann--Whitney $U$ $p$-value for the (buggy $>$ benign) size separation.}
+\label{tab:scal-growth}
+\begin{tabular}{lrrrrrl}
+\toprule
+Layer & Total & Churn & Med.\ & Buggy & Benign & Ratio [CI] \quad ($p$) \\
+      & delta & & /commit & mean & mean & \\
+\midrule
+AST & 3{,}614{,}922 & .44 & 84 & 909 & 366 & 2.48 [1.82,3.48] & $<$1e-99 \\
+CFG & 408{,}301 & .51 & 18 & 108 & 53 & 2.03 [1.71,2.41] & 3e-91 \\
+DFG & 648{,}553 & .38 & 31 & 208 & 75 & 2.78 [1.88,4.34] & $<$1e-99 \\
+PDG & 411{,}869 & .51 & 18 & 109 & 53 & 2.07 [1.74,2.46] & 1e-97 \\
+SEQ & 293{,}287 & .53 & 14 & 80 & 39 & 2.05 [1.72,2.43] & $<$1e-99 \\
+\bottomrule
+\end{tabular}
+\end{table}

@@ -30,7 +30,7 @@ Run:
   python build_online_kg.py --reset              # wipe online layer + restart
 """
 
-import argparse, json, subprocess, sys, tempfile, os
+import argparse, json, subprocess, sys, tempfile, os, time, csv
 from pathlib import Path
 from neo4j import GraphDatabase
 
@@ -342,7 +342,23 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int, default=0, help="process at most N commits this run")
     ap.add_argument("--reset", action="store_true", help="wipe online layer + checkpoint, restart")
+    ap.add_argument("--timing-log", default=None,
+                    help="optional CSV path; append one row per commit "
+                         "(idx, sha, files, delta counts, wall_ms) for the "
+                         "scalability/complexity analysis. Off by default so the "
+                         "normal build is unchanged. Useful when building the KG "
+                         "for a NEW project to capture per-commit wall-clock.")
     args = ap.parse_args()
+
+    tlog = None
+    if args.timing_log:
+        _new = not Path(args.timing_log).exists()
+        tlog = open(args.timing_log, "a", newline="", encoding="utf-8")
+        _tw = csv.writer(tlog)
+        if _new:
+            _tw.writerow(["idx", "sha", "A", "M", "D", "boot",
+                          "adds", "removes", "updates", "moves", "matched",
+                          "wall_ms"])
 
     driver = GraphDatabase.driver(NEO4J_URI, auth=NEO4J_AUTH)
     with driver.session() as s:
@@ -384,9 +400,11 @@ def main():
 
         for idx in range(start, end):
             commit = commits[idx]["id"]
+            _t_commit = time.perf_counter()
             changes = changed_java_files(commit)
             tag = "BUG " if commits[idx]["buggy"] else "    "
             line_counts = dict(A=0, M=0, D=0, boot=0)
+            cc = dict(adds=0, removes=0, updates=0, moves=0, matched=0)
 
             for status, path in changes:
                 if status == "D":
@@ -427,6 +445,8 @@ def main():
                 stt, new_map = res
                 for k in ("adds","removes","updates","moves","matched","total"):
                     agg[k] += stt[k]
+                for k in ("adds","removes","updates","moves","matched"):
+                    cc[k] += stt[k]
                 line_counts["M"] += 1
                 ck["file_state"][path] = commit
                 ck["file_maps"][path] = new_map      # thread node identity forward
@@ -434,10 +454,18 @@ def main():
             ck["next_index"] = idx + 1
             if idx % 20 == 0 or args.limit:
                 save_ckpt(ck)
+            if tlog is not None:
+                _tw.writerow([idx, commit, line_counts['A'], line_counts['M'],
+                              line_counts['D'], line_counts['boot'],
+                              cc['adds'], cc['removes'], cc['updates'], cc['moves'],
+                              cc['matched'],
+                              round(1000.0 * (time.perf_counter() - _t_commit), 2)])
             print(f"[{idx+1}/{len(commits)}] {tag}{commit[:8]}  "
                   f"A={line_counts['A']} M={line_counts['M']} "
                   f"D={line_counts['D']} boot={line_counts['boot']}")
 
+        if tlog is not None:
+            tlog.close()
         save_ckpt(ck)
         print(f"\n{'='*60}\nDONE [{start}:{end}]")
         print(f"  new files (ADDED):  {agg['new_files']}")

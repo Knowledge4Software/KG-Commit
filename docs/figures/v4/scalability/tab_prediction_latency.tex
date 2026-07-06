@@ -1,0 +1,23 @@
+% Auto-generated -- do not edit by hand.
+\begin{table}[t]
+\centering
+\caption{Prediction latency (median ms per commit) of the five final graph-inference
+methods across the graph family, at deployment (steady per-commit scoring from
+strictly-past state; embedding refit cost is amortised separately). The deployed
+graph-native fusion $F=$~RN$+$PPR runs at sub-millisecond per commit even on the
+richest final graph.}
+\label{tab:scal-latency}
+\begin{tabular}{lrrrrrr}
+\toprule
+Method & Core & +AST & +CFG & +DFG & +PDG & +AST+CSTG \\
+\midrule
+RN & .006 & .077 & .048 & .043 & .051 & .103 \\
+PPR & .035 & .101 & .061 & .056 & .063 & .208 \\
+LP & .005 & .020 & .008 & .008 & .008 & .038 \\
+DW & .001 & .001 & .001 & .001 & .001 & .001 \\
+KGE & .000 & .000 & .000 & .000 & .000 & .000 \\
+\midrule
+\textbf{$F$=RN+PPR} & .041 & .178 & .109 & .099 & .114 & .311 \\
+\bottomrule
+\end{tabular}
+\end{table}
