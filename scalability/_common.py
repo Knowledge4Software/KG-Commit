@@ -31,6 +31,8 @@ ROOT = Path(__file__).resolve().parent.parent
 INFERENCE = ROOT / "inference"
 OUT = ROOT / "outputs" / "scalability"
 FIG = ROOT / "docs" / "figures" / "v4" / "scalability"
+OUT_PARAM = ROOT / "outputs" / "param_experiments"
+FIG_PARAM = ROOT / "docs" / "figures" / "v4" / "param"
 OUT.mkdir(parents=True, exist_ok=True)
 
 # make the existing final-methodology code importable:
@@ -188,6 +190,13 @@ def _fit_pl(deg, xmin):
 
 def save_json(obj, name):
     p = OUT / name
+    json.dump(obj, open(p, "w"), indent=1, default=_json_default)
+    return p
+
+
+def save_param_json(obj, name):
+    OUT_PARAM.mkdir(parents=True, exist_ok=True)
+    p = OUT_PARAM / name
     json.dump(obj, open(p, "w"), indent=1, default=_json_default)
     return p
 

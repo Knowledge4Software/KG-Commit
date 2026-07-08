@@ -19,6 +19,8 @@
 \usepackage{graphicx}
 \graphicspath{{figures/}}
 \usepackage{float}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
 \usepackage[hidelinks]{hyperref}
 
 \definecolor{kgblue}{HTML}{1F77B4}
@@ -440,6 +442,49 @@
 	handful of delta edges, not a fresh copy of the file's tree. Removed nodes are
 	retained (flagged) so the complete change history is queryable while the live
 	tree always reflects the current code.
+
+	\subsection{Unpositioned nodes (\texttt{pos\_line}$=-1$) are correctness-neutral
+	by design}\label{sec:posneg}
+	\textbf{Summary (no fix required).} The large fraction of AST nodes with no source
+	position is \emph{not} an issue we need to repair: in the final methodology node
+	identity does not depend on positions at all, so the missing positions cannot cause
+	any modelling or evolution error --- fixing them would add cost without changing a
+	single delta edge or prediction. The rest of this subsection justifies that claim.
+
+	A natural concern about the AST layer is the large number of nodes carrying no
+	source position: in the final graph \textbf{$2{,}401{,}953$ of $3{,}699{,}439$
+	nodes ($64.9\%$) have \code{pos\_line}$=-1$}. This is \emph{expected} and not a
+	defect. Its \textbf{root cause} is the parser: \texttt{javalang} attaches a
+	\code{position} only to a subset of tree nodes. The $\approx$$1.74$M identifier and
+	operator \emph{leaves} (raw-string children) have no position by construction, as do
+	certain structural wrapper nodes ($\approx$$0.66$M), so $\approx\!65\%$ of nodes are
+	unpositioned regardless of engineering effort.
+
+	The historical \textbf{risk} of these missing positions was confined to an
+	\emph{earlier, discarded} design: the original GumTree-based engine matched diff
+	actions back to graph nodes by \code{(line,col)}, and with two thirds of nodes
+	unpositioned --- and $\approx$$32\%$ of the \emph{positioned} nodes sharing a
+	\code{(line,col)} with another node --- that matching drifted, threading node
+	identity incorrectly across versions and achieving only \textbf{recall $0.41$}
+	against ground truth (\S\ref{sec:identity}).
+
+	The \textbf{final methodology removes this risk by removing the dependence on
+	positions altogether.} The deployed javalang-native differ
+	(\code{online\_ast\_diff.py}) threads identity by (i)~\emph{deterministic pre-order
+	ids} --- identical source yields identical \texttt{::A\{i\}} ids, so the after-map of
+	commit~$N$ is exactly the before-map of $N{+}1$ --- and (ii)~\emph{structural}
+	matching (bottom-up subtree hashing then top-down parent propagation), with
+	positional comparison used only as a last-resort fallback. Unpositioned nodes,
+	including every leaf, are therefore matched by structure and identity, entirely
+	independently of \code{pos\_line}; this is why the final differ reaches
+	\textbf{precision $=$ recall $=1.000$} on the validation window where the
+	position-based predecessor reached $0.41$. Positions are retained only as an
+	optional descriptive attribute (for the position-set validation and for CSTG
+	cross-modal grounding), never as an identity key. The one honest residual is a
+	\emph{validation-coverage} caveat, not a data error: the lossless-evolution check is
+	a position-\emph{set} comparison and so directly exercises only the $35\%$ positioned
+	nodes; the unpositioned $65\%$ are threaded by the deterministic-id mechanism but are
+	not \emph{separately} position-verified (recorded as N4/C4).
 	
 	% ===========================================================================
 	\section{Labels for Bug Detection}
@@ -2929,6 +2974,25 @@
 	LP, the embeddings, and RN) holds across the entire stream and across all seven
 	metrics, so the conclusions are not artefacts of a single operating point.
 
+	\paragraph{Reading a stream plot: rolling window vs.\ step.} Each point on a
+	stream curve is a metric computed over a \textbf{trailing sliding window of the
+	last \code{ROLL}$=800$ commits} ending at that $x$-position --- \emph{not} a
+	cumulative-from-start value and \emph{not} a single-commit value. Two independent
+	parameters govern the curve: the window \emph{width} \code{ROLL}$=800$ (how many
+	commits each point aggregates) and the \emph{step} (how far the window advances
+	between plotted points; \code{step}$=$\code{BLOCK}, the block size, so
+	consecutive points overlap by $800-\code{BLOCK}$ commits and the curve reads as
+	smooth and near-continuous rather than one point per commit). Formally, the value
+	at position $j$ uses commits $[\max(0,j-800),\,j)$: for the first $<\!800$
+	evaluated commits this is unavoidably cumulative-from-start, and it becomes a true
+	$800$-wide rolling window thereafter. The window is a \emph{visualisation}
+	smoothing choice only --- it never enters the model or the reported scores; the
+	scalar numbers in the results tables are computed once over the \emph{entire}
+	evaluation slice (\S\ref{sec:v4-metrics}). We use $800$ (${\approx}10\%$ of the
+	stream, ${\approx}160$ positives at the ${\approx}20\%$ base rate) as a
+	bias--variance compromise: wide enough that per-point precision/recall are not
+	sampling noise, narrow enough to expose the concept drift.
+
 	\begin{figure}[H]
 		\centering
 		\includegraphics[width=\linewidth]{v4/final/fig_final_bygraph_final}
@@ -2962,6 +3026,23 @@
 		the best single method throughout.}
 		\label{fig:v4-final-fusion-part1}
 	\end{figure}
+
+	\paragraph{What the $G$ channel is.} To avoid confusion, $G$ is \emph{not} a sixth
+	graph-walk method: it is a separate \emph{feature-based classifier over the CSTG
+	layer}, whose predicted probability is stacked into the fusion by the same
+	prequential logistic regression used to combine the five methods
+	(\code{inference/run\_final\_fusion.py}, using
+	\code{cstg\_online\_features.py}). Per commit, $G$'s feature block concatenates
+	(i) a \emph{graph-of-words} text stream --- the commit's message$+$diff terms
+	weighted by \emph{TextRank} centrality on its word co-occurrence graph, then hashed;
+	(ii) an \emph{NPMI-propagated, past-only term-risk prior} (term bug-risk learned
+	from history and diffused over the NPMI term--term graph, refreshed periodically);
+	(iii) a $5$-dim \emph{typed-mass} vector over the defect lexicon
+	(\{code, bug, action, error, nl\}); and (iv) the message-intent\,/\,code-change
+	\emph{consistency} features. This is why $G$ is not admissible as a row of the
+	five-method $\times$ six-graph table (\S\ref{sec:v4-select5}): it is defined only on
+	the CSTG layer and ignores the commit--hub topology the five methods traverse.
+	It therefore enters the methodology only at the fusion stage, on top of $F$.
 
 	\paragraph{Adding the CSTG channel and the JIT metrics.} Finally we ask whether
 	the explicit CSTG semantic channel ($G$) or the non-graph JIT metrics ($M$) add
@@ -3111,6 +3192,288 @@
 
 	\input{figures/v4/scalability/tab_significance.tex}
 
+	% =======================================================================
+	\section{Algorithms}\label{sec:algorithms}
+	% =======================================================================
+	This section gives precise, paper-ready pseudocode for every component of the
+	final (V4) methodology, in the order the pipeline uses them: constructing the
+	knowledge graph (Core, AST, the online AST delta layer with its differ, and the
+	CSTG semantic layer), and then the inference stack (the five graph-native
+	scorers, the CSTG channel, and the online prequential evaluation and fusion). The
+	pseudocode mirrors the reference implementation
+	(\code{build\_ast\_features.py}, \code{online\_ast\_diff.py},
+	\code{build\_online\_kg.py}, \code{inference/cstg.py},
+	\code{cstg\_online\_features.py}, \code{inference/kg\_methods.py},
+	\code{run\_final\_experiments.py}, \code{run\_final\_fusion.py},
+	\code{online\_jit.py}); symbol conventions follow Sections~\ref{sec:online}
+	and~\ref{sec:v4-select5}.
+
+	\subsection{Knowledge-graph construction}\label{sec:algo-build}
+
+	\paragraph{Core / process layer.} The Core layer is the classical commit graph,
+	ingested from the ApacheJIT CSV and the local git clone. It is a direct
+	materialisation (Algorithm~\ref{alg:core}): one \node{Commit} per labelled SHA
+	carrying its label and the $12$ change metrics, linked to its author
+	(\edge{AUTHORED\_BY}), parents (\edge{PARENT\_OF}), referenced issues
+	(\edge{FIXES\_ISSUE}), and changed files (\edge{ADDED}/\edge{MODIFIED}/%
+	\edge{DELETED}). It contains no learning; it is the relational backbone the
+	AST/CSTG layers and all inference methods attach to.
+
+	\begin{algorithm}[H]
+	\caption{Build the Core process layer}\label{alg:core}
+	\begin{algorithmic}[1]
+	\Require ApacheJIT records $J$ (one per labelled commit); git repository $G$
+	\For{each record $j \in J$ in chronological order (by \code{author\_ts})}
+	  \State \textbf{MERGE} \node{Commit} $c$ with \code{id}$=j.\text{sha}$;
+	         set \code{buggy}, \code{is\_fix}, \code{author\_ts}, \code{jit\_year},
+	         \code{in\_jit}$=\textsc{true}$, and metrics
+	         $(\code{la},\code{ld},\code{nf},\code{nd},\code{ns},\code{ent},
+	           \code{ndev},\code{age},\code{nuc},\code{aexp},\code{arexp},\code{asexp})$
+	  \State \textbf{MERGE} \node{Developer} $d$; add $(c)\!\xrightarrow{\edge{AUTHORED\_BY}}\!(d)$
+	  \For{each parent sha $p$ of $c$ in $G$} add $(p)\!\xrightarrow{\edge{PARENT\_OF}}\!(c)$ \EndFor
+	  \For{each issue key $k$ parsed from $c$'s message} add $(c)\!\xrightarrow{\edge{FIXES\_ISSUE}}\!(\node{Issue}\,k)$ \EndFor
+	  \For{each file $f$ changed by $c$ (status $s\in\{A,M,D\}$ from \code{git diff})}
+	     \State \textbf{MERGE} \node{File} $f$; add $(c)\!\xrightarrow{\{\edge{ADDED},\edge{MODIFIED},\edge{DELETED}\}[s]}\!(f)$
+	  \EndFor
+	\EndFor
+	\end{algorithmic}
+	\end{algorithm}
+
+	\paragraph{AST subgraph of a file.} A single file's AST is built by one
+	deterministic pre-order DFS over the \texttt{javalang} parse tree
+	(Algorithm~\ref{alg:ast}), assigning every node the stable id
+	$\{rel\}\code{::A}\{i\}$ where $i$ is the pre-order counter. \emph{This
+	determinism is the linchpin of the whole delta layer}: the same source always
+	yields the same ids, so a file's ``after'' parse at commit $N$ is id-identical to
+	its ``before'' parse at $N{+}1$. Structured nodes carry their javalang type and a
+	short value (name/value/operator); raw-string children become \code{Identifier}
+	leaves.
+
+	\begin{algorithm}[H]
+	\caption{\textsc{BuildAstSubgraph}: deterministic AST of one file/method root}\label{alg:ast}
+	\begin{algorithmic}[1]
+	\Require javalang root node $r$, id prefix $rel$
+	\Ensure directed AST $A$ with stable node ids and \edge{AST\_CHILD} edges
+	\State $i \gets 0$; \; $\textproc{stack} \gets [(r,\ \textsc{nil},\ 0)]$
+	\While{\textproc{stack} non-empty}
+	  \State pop $(v,\ \textit{par},\ \textit{cpos})$; \; $\textit{nid} \gets \{rel\}\code{::A}i$; \; $i \gets i+1$
+	  \If{$v$ is a javalang \code{Node}}
+	     \State $\textit{val} \gets$ first present of $\{v.\text{name}, v.\text{value}, v.\text{operator}\}$ (truncated to 24 chars)
+	     \State add node $\textit{nid}$ with $\code{ast\_type}=\textproc{typename}(v)$, $\code{group}=\textproc{astGroup}(v)$, \code{value}$=\textit{val}$, $\code{is\_leaf}=\textsc{false}$
+	     \State \textit{childpos} $\gets 0$
+	     \For{each direct child $u \in v.\text{children}$ (recurse into lists/sets; keep non-blank strings)}
+	        \State push $(u,\ \textit{nid},\ \textit{childpos})$; \; $\textit{childpos} \gets \textit{childpos}+1$
+	     \EndFor
+	     \State push children in \emph{reverse} so they pop in source order
+	  \Else \Comment{raw-string child}
+	     \State add node $\textit{nid}$ with $\code{ast\_type}=\code{Identifier}$, $\code{group}=\code{leaf}$, \code{value}$=v$, $\code{is\_leaf}=\textsc{true}$
+	  \EndIf
+	  \If{$\textit{par}\neq\textsc{nil}$} add edge $\textit{par}\!\xrightarrow{\edge{AST\_CHILD}\ \{pos=cpos\}}\!\textit{nid}$ \EndIf
+	\EndWhile
+	\State \Return $A$, root id $\{rel\}\code{::A}0$
+	\end{algorithmic}
+	\end{algorithm}
+
+	\paragraph{Threading a change: the javalang-native tree differ.} When a tracked
+	file is modified, its stored ``before'' state and its content at the commit are
+	\emph{both} parsed with Algorithm~\ref{alg:ast}, then matched by
+	Algorithm~\ref{alg:diff}. Matching is structural --- bottom-up identical-subtree
+	hashing (largest subtrees first, ties broken toward equal source position), then
+	top-down parent propagation over aligned ancestors, with a positional match used
+	only as a last resort. Unmatched before-nodes are deletions, unmatched
+	after-nodes are insertions, matched nodes with a changed value are updates, and a
+	matched node whose matched parent differs is a move. Because identity is carried
+	by the deterministic ids (not positions), this is exact and drift-free
+	(precision$=$recall$=1$ on the validation window; contrast the discarded
+	position-based matcher at recall $0.41$, \S\ref{sec:identity}).
+
+	\begin{algorithm}[H]
+	\caption{\textsc{DiffAst}: match two versions of a file's AST}\label{alg:diff}
+	\begin{algorithmic}[1]
+	\Require before/after sources; build $(A^b,A^a)$ via Algorithm~\ref{alg:ast}
+	\Ensure $\textit{matched},\textit{deleted},\textit{inserted},\textit{moved}$
+	\State compute a subtree hash $h(\cdot)=\textsc{md5}\big(\code{ast\_type}\,\|\,\code{value}\,\|\,h(\text{children})\big)$ for every node of $A^b,A^a$
+	\State $\mu \gets \emptyset$ (before$\to$after map); \; $\textit{used}\gets\emptyset$
+	\Statex \textit{// 1. bottom-up identical-subtree match, shallow (largest) subtrees first}
+	\For{each $b \in A^b$ sorted by increasing depth, $b\notin\mu$}
+	  \State $\mathcal{C} \gets \{a\in A^a : h(a)=h(b),\ a\notin\textit{used}\}$; \textbf{continue} if empty
+	  \State pick $a^\star\in\mathcal{C}$ preferring equal $(\code{line},\code{col})$; \; \textproc{matchSubtree}$(b,a^\star)$ pairwise over the identical shape
+	\EndFor
+	\Statex \textit{// 2. top-down parent propagation until fixpoint}
+	\Repeat
+	  \For{each $(b,a)\in\mu$ with parents $b_p,a_p$ where $b_p\notin\mu,\ a_p\notin\textit{used}$ and $\code{ast\_type}(b_p)=\code{ast\_type}(a_p)$}
+	     \State $\mu[b_p]\gets a_p$; add $a_p$ to \textit{used}
+	  \EndFor
+	\Until{no change}
+	\Statex \textit{// 3. positional fallback for still-unmatched positioned nodes}
+	\For{each unmatched $b$ with $\code{line}>0$} match to an unused $a$ with equal $(\code{ast\_type},\code{line},\code{col})$ if any \EndFor
+	\State $\textit{matched} \gets \{(b,a,\ \code{value}(b)\!\neq\!\code{value}(a),\ \code{value}(a)) : (b,a)\in\mu\}$
+	\State $\textit{moved} \gets \{(a,\code{ast\_type}(a_p)) : (b,a)\in\mu,\ b_p\in\mu,\ \mu[b_p]\neq a_p\}$
+	\State $\textit{deleted}\gets A^b\!\setminus\!\mathrm{dom}(\mu)$; \; $\textit{inserted}\gets A^a\!\setminus\!\textit{used}$
+	\State \Return $\textit{matched},\textit{deleted},\textit{inserted},\textit{moved}$
+	\end{algorithmic}
+	\end{algorithm}
+
+	\paragraph{Online growth of the AST delta layer.} The engine streams the $8{,}059$
+	commits in \code{author\_ts} order, maintaining per file the current AST state and
+	a per-file identity map $\mathrm{node\_map}:\{\text{parse id}\}\!\to\!\{\text{graph
+	id}\}$ (Algorithm~\ref{alg:online}). Added files (and lazily bootstrapped
+	untracked files) get a full AST via Algorithm~\ref{alg:ast}; modified files are
+	diffed by Algorithm~\ref{alg:diff} and the delta is written as
+	\edge{ADDS}/\edge{REMOVES}/\edge{UPDATES}/\edge{MOVES} edges from the commit to
+	the affected nodes, evolving the stored tree in place (removed nodes are kept,
+	flagged \code{alive}$=\textsc{false}$, so history is preserved). Only deltas are
+	stored --- never a per-commit snapshot --- so space grows with the amount of change.
+
+	\begin{algorithm}[H]
+	\caption{Online AST delta-layer growth}\label{alg:online}
+	\begin{algorithmic}[1]
+	\Require labelled commits in \code{author\_ts} order; base AST + \code{file\_state}, \code{file\_maps} seeded at BASE
+	\For{each commit $c$ (resumable from checkpoint)}
+	  \For{each changed \code{.java} file $(s,f)$ of $c$, $s\in\{A,M,D\}$}
+	     \If{$s=D$ and $f$ tracked}
+	        \State mark every alive node of $f$ \code{alive}$=\textsc{false}$, \code{removed\_by}$=c$; add $(c)\!\xrightarrow{\edge{REMOVES}}\!(\cdot)$; untrack $f$
+	     \ElsIf{$s=A$ \textbf{or} $f$ untracked} \Comment{full build / lazy bootstrap at $c$ or $c^{\wedge}1$}
+	        \State $A \gets \textsc{BuildAstSubgraph}$(blob); attach \edge{HAS\_AST} and the \edge{AST\_CHILD} tree
+	        \If{$s=A$} add $(c)\!\xrightarrow{\edge{ADDS}}\!(\cdot)$ for every node; track $f$ at $c$; \textbf{continue}
+	        \Else\ track $f$ at $c^{\wedge}1$ and fall through to the modify case \EndIf
+	     \EndIf
+	     \If{$s=M$ ($f$ tracked)}
+	        \State $\delta \gets \textsc{DiffAst}$(stored state of $f$, content at $c$) \Comment{Algorithm~\ref{alg:diff}}
+	        \State $\textit{matched}\!\to$ keep graph id (restamp position; if value changed, \edge{UPDATES} and set new value)
+	        \State $\textit{deleted}\!\to$ \code{alive}$=\textsc{false}$, \code{removed\_by}$=c$, \edge{REMOVES}
+	        \State $\textit{inserted}\!\to$ new node id $\{f\}\code{::D}\{c_{[:8]}\}\code{:}i$, \code{is\_delta}$=\textsc{true}$, wire \edge{AST\_CHILD} to its (matched or new) parent, \edge{ADDS}
+	        \State $\textit{moved}\!\to$ \edge{MOVES} with \code{new\_parent\_type}
+	        \State update \code{file\_maps}[$f$] to the after-map; track $f$ at $c$
+	     \EndIf
+	  \EndFor
+	\EndFor
+	\end{algorithmic}
+	\end{algorithm}
+
+	\paragraph{CSTG semantic layer.} The CSTG turns each commit's text (message
+	$+$ diff) into a graph-of-words and fits corpus term statistics on \emph{train
+	commits only} (Algorithm~\ref{alg:cstg}): a TW-IDF term weighting from per-commit
+	\emph{TextRank} centrality, a global NPMI \node{Term}--\node{Term} co-occurrence
+	graph, defect-semantic term typing $\{$code, bug, action, error, nl$\}$, and a
+	term bug-risk propagated over the NPMI graph. Ingestion writes the same objects to
+	Neo4j (\node{Term}, \edge{MENTIONS}, \edge{COOCCURS}, plus \node{Intent}/%
+	\edge{HAS\_INTENT} typing and optional \edge{GROUNDS\_IN} links to AST leaves).
+
+	\begin{algorithm}[H]
+	\caption{CSTG fit (train-only) and per-commit transform}\label{alg:cstg}
+	\begin{algorithmic}[1]
+	\Require commit texts; labels $y$; train indices $\mathcal{T}$
+	\Statex \textbf{Tokenise:} for each commit, \textsc{ParseCommitText} $\to$ (message, added, removed); emit typed tokens $(\text{type},\text{term})$ with camel-case splitting, \code{*Exception/*Error} capture, and defect lexicons; drop stopwords/noise
+	\Statex \textbf{Fit (on $\mathcal{T}$ only):}
+	\State vocabulary $=$ terms with document frequency $\ge \code{min\_df}$; $\code{idf}(t)=\log\frac{1+|\mathcal{T}|}{1+\mathrm{df}(t)}+1$; term type $=$ first-seen type
+	\State NPMI graph: for co-occurring $(a,b)$ with count $\ge2$, $\mathrm{npmi}=\frac{\log(p_{ab}/p_a p_b)}{-\log p_{ab}}$; keep edges $\ge\code{npmi\_thresh}$
+	\State base risk $\mathrm{base}(t)=\frac{\text{buggy}(t)+g\cdot5}{\text{total}(t)+5}$ (global rate $g$); propagate for \code{prop\_iters}: $\mathrm{risk}(t)\!\gets\!(1{-}\lambda)\mathrm{base}(t)+\lambda\frac{\sum_{u}w_{tu}\mathrm{risk}(u)}{\sum_u w_{tu}}$ over NPMI neighbours
+	\Statex \textbf{Transform (any commit $i$):}
+	\State $\code{cen}\gets\textsc{GraphOfWordsTextRank}(\text{terms}_i)$ \Comment{window co-occurrence; $30$ power iterations, damping $0.85$}
+	\State weight $w_t=\code{cen}(t)\cdot\code{idf}(t)$; emit sparse row $X_{\text{twidf}}[i,t]=w_t$
+	\State $\code{typed}[i,\tau]\mathrel{+}=w_t$ for term type $\tau$; \; $\code{prior}[i]=\frac{\sum_t w_t\,\mathrm{risk}(t)}{\sum_t w_t}$
+	\State \Return $(X_{\text{twidf}},\code{prior},\code{typed})$
+	\end{algorithmic}
+	\end{algorithm}
+
+	\subsection{Inference and learning}\label{sec:algo-infer}
+
+	\paragraph{The commit--hub graph.} All five methods read the same
+	bipartite commit--hub graph built per graph-family member
+	(Algorithm~\ref{alg:hub}): each commit is linked to its hubs --- file and developer
+	(the Core), the layer's change-tokens $\{edge\}\code{:}\{type\}$ (for a structural
+	graph), and, on the final graph, its CSTG \node{Term} hubs --- with TF-IDF edge
+	weights. From it we form the commit$\times$hub incidence $C$ and the symmetric,
+	column-normalised transition $P$ over the $N_c{+}N_h$ nodes.
+
+	\begin{algorithm}[H]
+	\caption{Build the commit--hub graph $(C,P)$ for a graph-family member}\label{alg:hub}
+	\begin{algorithmic}[1]
+	\Require commits (chronological); per-commit files, developer, layer tokens, CSTG terms
+	\State collect weighted memberships $(c, \textit{hub}, w)$: files and developer ($w{=}1$); layer tokens ($w{=}$count); on \emph{final}, AST tokens $+$ CSTG terms
+	\State $\mathrm{df}(\textit{hub})\gets$ number of commits touching it; edge weight $=w\cdot\log\!\big(1+N_c/\mathrm{df}\big)$
+	\State $C \in \mathbb{R}^{N_c\times N_h}$ (commit$\times$hub incidence); $B$ its bipartite lift into the $(N_c{+}N_h)$-node space
+	\State $A \gets B+B^{\!\top}$; \; $P \gets A\,\mathrm{diag}(A^{\!\top}\mathbf{1})^{-1}$ (column-stochastic)
+	\State \Return $C,P$, typed edge list $E$
+	\end{algorithmic}
+	\end{algorithm}
+
+	\paragraph{The five graph-native scorers.} Each scorer maps the strictly-past
+	state to a buggy-probability for the current block, leakage-free
+	(Algorithm~\ref{alg:methods}). RN is a one-hop label-weighted neighbour vote; PPR
+	is class-seeded random-walk-with-restart; LP is a few steps of clamped label
+	spreading; DW is a DeepWalk-as-matrix-factorisation embedding (PPMI of the
+	past-only co-occurrence, truncated SVD) with a logistic head; KGE is a compact
+	DistMult over typed $(\text{commit},\text{rel},\text{hub})$ triples with logistic
+	head. DW and KGE are refit every $\code{REFIT\_EMB}$ blocks.
+
+	\begin{algorithm}[H]
+	\caption{The five graph-native scorers (block \textit{idx}, past \textit{past})}\label{alg:methods}
+	\begin{algorithmic}[1]
+	\State \textbf{RN:} $s = \dfrac{C[\textit{idx}]\,C[\textit{past}]^{\!\top}\,y[\textit{past}]}{C[\textit{idx}]\,C[\textit{past}]^{\!\top}\mathbf{1}}$ \Comment{label-weighted hub overlap; default to past bug-rate if denom.\ $0$}
+	\State \textbf{PPR:} for seeds $=$ past buggy ($b$) / benign ($g$): $r \gets \textsc{RWR}(P,\text{seeds})$ with $r\!\leftarrow\!(1{-}\alpha)Pr+\alpha r_0$, $40$ iters; \; $s = r_b/(r_b+r_g)$
+	\State \textbf{LP:} clamp $f[\textit{past}]=y[\textit{past}]$; iterate $f \gets C_{\text{row}}(C_{\text{col}}^{\!\top} f)$ a few steps re-clamping past; read $f[\textit{idx}]$
+	\State \textbf{DW:} $M=\mathrm{PPMI}$ of past commit--hub co-occurrence; $U\Sigma\!\gets\!\textsc{TruncatedSVD}(M)$; embed $=U\sqrt\Sigma$; logistic head on $\text{embed}[\textit{past}]$
+	\State \textbf{KGE:} DistMult $\mathrm{score}=\langle e_c, r, e_h\rangle$ trained by logistic loss with negative hub-corruption over past triples; fold in each commit as the mean of its hubs' $r\!\odot\!e_h$; logistic head
+	\State \Return per-method scores on \textit{idx}
+	\end{algorithmic}
+	\end{algorithm}
+
+	\paragraph{The CSTG channel $G$.} $G$ is a feature-based classifier (not a
+	graph walk): per commit it builds a graph-of-words-weighted, polarity-tagged text
+	stream $X_{\text{text}}$ together with the online NPMI-propagated \code{prior},
+	the $5$-dim \code{typed} mass, and the intent-consistency block, all strictly
+	past-only (Algorithm~\ref{alg:gchannel}); a prequential logistic regression turns
+	this block into $G$'s probability. Its score is then \emph{stacked} into the
+	fusion alongside the graph methods.
+
+	\begin{algorithm}[H]
+	\caption{Online CSTG channel $G$ (past-only)}\label{alg:gchannel}
+	\begin{algorithmic}[1]
+	\State cache per-commit typed tokens and TextRank centralities (commit-local, leakage-free)
+	\State $X_{\text{text}}\gets$ hashing-vectorise tokens $\{src\}\code{:}\{type\}\code{:}\{term\}$ repeated $\propto$ centrality
+	\State maintain past counters: term bug/total, global rate $g$, co-occurrence pairs
+	\For{each commit $i$ in order}
+	   \State \textbf{predict:} $\code{prior}[i]=\frac{\sum_t \code{cen}_i(t)\,\mathrm{risk}(t)}{\sum_t \code{cen}_i(t)}$; \; $\code{typed}[i,\tau]\mathrel{+}=\code{cen}_i(t)$
+	   \State \textbf{grow:} fold $y[i]$ into counters; every \code{PROP\_REFRESH} commits recompute NPMI from past counts and re-propagate $\mathrm{risk}$
+	\EndFor
+	\State $G$-features $=[\,\code{prior}\mid\code{typed}\mid\code{consistency}\mid X_{\text{text}}\,]$; score by prequential logistic regression
+	\end{algorithmic}
+	\end{algorithm}
+
+	\paragraph{Online prequential protocol, operating point, and fusion.} Every
+	method and fusion is scored under one protocol (Algorithm~\ref{alg:online-eval}):
+	warm up on the first fraction of the stream, then process the rest in blocks ---
+	\emph{predict} each block from strictly-past state, \emph{reveal} the labels,
+	\emph{grow} the state, and periodically \emph{refit}. Threshold-based metrics use
+	a leakage-free \emph{online-tuned} operating point: the decision threshold is
+	re-tuned on \emph{past} predictions only (maximising buggy-F1) every \code{step}
+	commits. The deployed model fuses the five methods and the CSTG channel by
+	prequential logistic-regression stacking; the final choice is $F=\text{RN}+\text{PPR}$
+	and, adding the semantic channel, the deployed $F{+}G=\text{RN}+\text{PPR}+\text{CSTG}$
+	(the non-graph JIT metrics $M$ are dropped).
+
+	\begin{algorithm}[H]
+	\caption{Online prequential evaluation, operating point, and fusion}\label{alg:online-eval}
+	\begin{algorithmic}[1]
+	\Require chronological commits; warmup fraction; block size; method scores $\{s_m\}$; fusion subset $S$
+	\State $W \gets \lfloor \text{warmup}\cdot N\rfloor$; realise state over $[0,W)$
+	\State $i \gets W$
+	\While{$i<N$}
+	  \State $\textit{idx}\gets[i,\min(N,i{+}\text{block}))$; \; $\textit{past}\gets[0,i)$
+	  \State \textbf{predict} $\textit{idx}$ from methods/channels fit on \textit{past} only (Alg.~\ref{alg:methods},\ref{alg:gchannel})
+	  \If{$|S|=1$} $p[\textit{idx}]\gets s_{S}[\textit{idx}]$
+	  \Else\ stack $Z=[\,s_m[\cdot]\,]_{m\in S}$; $p[\textit{idx}]\gets\textsc{LR}(Z[W{:}i],y[W{:}i]).\Pr(Z[\textit{idx}])$; refit every few blocks
+	  \EndIf
+	  \State \textbf{grow} state with block labels; \; $i \gets $ block end
+	\EndWhile
+	\Statex \textit{// leakage-free operating point for threshold-based metrics}
+	\State $\theta\gets0.5$; \For{$i=0\ldots N{-}1$} $\hat y[i]=[\,p[i]\ge\theta\,]$; every \code{step} commits (after \code{init}) set $\theta=\arg\max_\theta \text{buggyF1}(y[{:}i],p[{:}i])$ \EndFor
+	\State \Return ranking metrics (ROC-AUC, PR-AUC) from $p$; operating-point metrics (Precision, Recall, Buggy-F1, Macro-F1, G-Mean, Accuracy) from $\hat y$
+	\end{algorithmic}
+	\end{algorithm}
+
 	\subsection{Conclusion}\label{sec:v4-concl}
 	Under a fair, identical online protocol with text and the semantic-text
 	subgraph disabled, the \textbf{AST delta-subgraph is the strongest structural
@@ -3156,5 +3519,139 @@
 	\textbf{PPR} attains the best cell (buggy $F_1=.55$, G$=.72$, AUC$=.78$).
 
 	\input{figures/v4/tab_paper_groovy.tex}
+
+	% =======================================================================
+	\section{Discussion}\label{sec:discussion}
+	% =======================================================================
+	\subsection{Sensitivity to the online-protocol setup}\label{sec:disc-params}
+	A defect predictor is only trustworthy if its headline results are not an
+	artefact of a particular experimental setup. We therefore vary the four setup
+	parameters that most plausibly affect an \emph{online} evaluation --- one at a
+	time, all others held at their defaults --- on the final deployed graph
+	(\emph{Core$+$AST$+$CSTG}), scoring the five graph-native methods and the deployed
+	fusion $F=$~RN$+$PPR (the CSTG classifier channel $G$ and the JIT metrics $M$ are
+	\emph{not} used, isolating the graph-native model). All seven headline metrics are
+	reported. The experiments are produced by
+	\code{scalability/run\_param\_experiments.py} and rendered in the companion
+	notebook \code{experiments/notebooks/parameter\_experiments.ipynb}; they reuse the
+	cached final-graph state and so require no rebuild.
+
+	\paragraph{Warmup fraction $K$.} $K$ is the fraction of the stream used to fit
+	before scoring begins (Table~\ref{tab:param-K}, \ref{tab:param-K-F};
+	Figure~\ref{fig:param-K}). Performance is stable across a broad range and peaks at
+	a \emph{modest} warmup: the fusion's Buggy-F1 rises $0.534\!\to\!0.552$ from
+	$K{=}0.2$ to $K{=}0.4$ and then falls ($0.528$ at $K{=}0.5$) as warmup eats into
+	the evaluated stream, while AUC declines gently and monotonically with more warmup
+	(more history fit, but a shorter, later, harder test span). The default
+	$K{=}0.3$ sits at the knee --- near-peak accuracy without wasting stream.
+
+	\paragraph{Label-availability gap $M$.} This is the most deployment-realistic
+	knob. In practice a commit's SZZ label is only known once later fixes appear, so
+	the labels of the most recent commits are \emph{not} yet available at prediction
+	time. We emulate this by withholding the labels of the $M$ commits immediately
+	before each block while still exposing their graph structure
+	(Table~\ref{tab:param-M}, \ref{tab:param-M-F}; Figure~\ref{fig:param-M}). The model
+	degrades \emph{gracefully and without collapse}: the fusion's Buggy-F1 moves only
+	$0.552\!\to\!0.531$ and AUC $0.769\!\to\!0.744$ as the gap grows from $0$ to $400$
+	commits. That the KG signal tolerates a substantial label gap --- because the
+	structural and relational evidence a commit sits in is available immediately, even
+	when its label is not --- is a practical strength of the graph over a labels-only
+	predictor.
+
+	\paragraph{Warmup under a realistic gap, and comparison to labels-only baselines.}
+	The two constraints above --- limited warmup and late-arriving labels --- act
+	together in practice, so we run the decisive experiment: fix the gap at a realistic
+	$M{=}200$ and sweep the warmup $K\in\{0,0.05,0.1,0.2,0.3,0.4,0.5\}$ (including a
+	\emph{cold start}), evaluating our methods \emph{and} two labels-only baselines ---
+	a JIT-metrics logistic regression and the naive prior bug-rate --- under the
+	\textbf{identical} prequential setup, each using only the labelled past $[0,i{-}M)$
+	(Table~\ref{tab:param-KM-compare}; Figure~\ref{fig:param-KM}). Two findings stand
+	out. First, our model needs little warmup even \emph{with} the gap: the deployed
+	fusion's Buggy-F1 rises from $0.456$ at a full cold start ($K{=}0$) to $0.51$ by
+	$K{=}0.05$ and plateaus (peak $0.543$ at $K{=}0.4$), while its ranking quality is
+	strong throughout (AUC $\approx0.79$ even at $K{=}0$). Second, and most importantly,
+	\textbf{our methods dominate the labels-only baselines by a wide, consistent margin
+	under these real-world constraints}: across every warmup level the fusion and PPR
+	($\text{Buggy-F1}\approx0.51$--$0.54$, AUC $\approx0.77$--$0.79$) beat the JIT-metrics
+	LR ($\approx0.42$--$0.45$, AUC $\approx0.67$--$0.70$) and the naive rate
+	($\approx0.36$--$0.39$), and the advantage is \emph{largest at low warmup / cold
+	start} --- exactly where a labels-only predictor is weakest --- because the graph
+	supplies structural and relational evidence immediately, independent of how many
+	recent labels have arrived. This is the clearest single demonstration that the
+	knowledge graph earns its keep precisely under deployment conditions.
+
+	\paragraph{Rolling / smoothing window.} The rolling window governs only how the
+	streaming trajectories are \emph{visualised} (each point averages the trailing
+	window; \S\ref{sec:v4-metrics}). As expected, the whole-stream scores are
+	\textbf{invariant} to it --- Buggy-F1 $0.552$ and AUC $0.769$ at every window width
+	$\{200,400,800,1600\}$ (Table~\ref{tab:param-ROLL}) --- and only the smoothness of
+	the trajectory changes. No conclusion in the paper depends on this reporting
+	choice; we use $800$ as a bias--variance compromise for the plots.
+
+	\paragraph{Online CSTG-hub refresh cadence $l$.} The final graph carries CSTG
+	\node{Term} hubs; here their edge weights are re-estimated from past-only NPMI
+	every $l$ commits, so larger $l$ means staler semantic-hub weights on the graph the
+	methods walk (the CSTG \emph{classifier} $G$ remains unused). The deployed fusion is
+	insensitive to $l$ over the tested range (Table~\ref{tab:param-l},
+	\ref{tab:param-l-F}; Figure~\ref{fig:param-l}), so the online re-propagation can be
+	\emph{infrequent and cheap} without hurting accuracy --- a useful operational
+	finding for large-scale deployment.
+
+	\paragraph{Summary.} Across all sweeps the method ordering and the fusion's
+	dominance are preserved (Figure~\ref{fig:param-robust}): the deployed model is
+	robust to warmup, tolerant of realistic label gaps, invariant to the reporting
+	window, and forgiving of stale semantic-hub refresh --- and under the combined
+	real-world constraints (a fixed gap with low warmup) it \emph{beats the labels-only
+	baselines by a wide margin}. The headline results are therefore properties of the
+	knowledge graph and its methods, not of a hand-tuned setup.
+
+	\input{figures/v4/param/tab_param_KM_compare.tex}
+	\input{figures/v4/param/tab_param_K.tex}
+	\input{figures/v4/param/tab_param_K_F.tex}
+	\input{figures/v4/param/tab_param_M.tex}
+	\input{figures/v4/param/tab_param_M_F.tex}
+	\input{figures/v4/param/tab_param_ROLL.tex}
+	\input{figures/v4/param/tab_param_l.tex}
+	\input{figures/v4/param/tab_param_l_F.tex}
+
+	\begin{figure}[t]\centering
+		\includegraphics[width=\linewidth]{v4/param/fig_param_KM_compare}
+		\caption{Real-world-constraint comparison at a fixed label gap $M{=}200$ over
+		the warmup sweep: the deployed fusion $F$ and PPR (ours) versus the labels-only
+		JIT-metrics LR and naive prior-rate baselines, on Buggy-F1 (left) and AUC
+		(right). Our methods dominate throughout, with the largest margin at low
+		warmup.}\label{fig:param-KM}
+	\end{figure}
+
+	\begin{figure}[t]\centering
+		\includegraphics[width=.48\linewidth]{v4/param/fig_param_K_lines}\hfill
+		\includegraphics[width=.48\linewidth]{v4/param/fig_param_K_heat}
+		\caption{Sensitivity to the warmup fraction $K$: deployed fusion metrics
+		(left) and Buggy-F1 across methods (right). Near-flat with a mild peak at
+		$K{\approx}0.4$.}\label{fig:param-K}
+	\end{figure}
+
+	\begin{figure}[t]\centering
+		\includegraphics[width=.48\linewidth]{v4/param/fig_param_M_lines}\hfill
+		\includegraphics[width=.48\linewidth]{v4/param/fig_param_M_heat}
+		\caption{Sensitivity to the label gap $M$: graceful degradation as recent
+		labels are withheld, with no collapse --- the graph structure carries signal
+		even when labels arrive late.}\label{fig:param-M}
+	\end{figure}
+
+	\begin{figure}[t]\centering
+		\includegraphics[width=.48\linewidth]{v4/param/fig_param_l_lines}\hfill
+		\includegraphics[width=.48\linewidth]{v4/param/fig_param_l_heat}
+		\caption{Sensitivity to the online CSTG-hub refresh cadence $l$: the deployed
+		fusion is essentially flat, so infrequent (cheap) refresh
+		suffices.}\label{fig:param-l}
+	\end{figure}
+
+	\begin{figure}[t]\centering
+		\includegraphics[width=\linewidth]{v4/param/fig_param_F_robustness}
+		\caption{Robustness synthesis: the deployed fusion $F$'s seven headline
+		metrics against each setup parameter. The model is stable throughout, so the
+		headline conclusions do not depend on the setup.}\label{fig:param-robust}
+	\end{figure}
 
 \end{document}
