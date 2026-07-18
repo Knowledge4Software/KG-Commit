@@ -1,0 +1,674 @@
+\documentclass[11pt]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[margin=1in]{geometry}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true, linkcolor=blue!55!black, urlcolor=blue!55!black,
+            citecolor=blue!55!black}
+
+\definecolor{codebg}{RGB}{245,245,245}
+\lstset{
+  basicstyle=\ttfamily\small,
+  backgroundcolor=\color{codebg},
+  breaklines=true,
+  frame=single,
+  rulecolor=\color{gray!40},
+  columns=fullflexible,
+  keepspaces=true,
+  showstringspaces=false,
+}
+
+\newcommand{\code}[1]{\texttt{#1}}
+
+\title{\textbf{Critical Notes: Data-Provenance Defects and Fixes}\\[0.4em]
+       \large KG-Commit Reproducibility Package}
+\author{}
+\date{Recorded 2026-07-14}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This document records a critical data-provenance defect discovered in the
+cross-project build of the KG-Commit pipeline, the investigation that isolated
+its root cause, the decision taken to fix it, and the engineering logic of that
+fix. It is written so that a future reader (or reviewer) can understand exactly
+what went wrong, why the first \code{hadoop-mapreduce} graph was silently
+incomplete, why the chosen remedy (a \emph{multi-repository} build) is the
+faithful one, and what limitations remain. The same failure mode can affect
+\emph{any} project whose defect labels were mined across a repository split, so
+the note is intended as a durable reference, not a one-off changelog entry.
+\end{abstract}
+
+\tableofcontents
+
+% ======================================================================
+\section{Summary}
+% ======================================================================
+The first end-to-end build of the \code{hadoop-mapreduce} project silently
+produced a knowledge graph covering only \textbf{525 of the 1{,}321 labelled
+commits} (39.7\%). Every layer was affected---not only the semantic text
+(CSTG) layer but also the structural layers (AST delta, CFG, DFG, PDG, SEQ),
+which are the most critical to the method. The build \emph{reported success}
+because the missing commits produced no error the driver checked for: their
+commit SHAs simply could not be resolved in the git repository the build was
+pointed at, so they were skipped.
+
+The root cause is a \textbf{repository-split provenance mismatch}. The ApacheJIT
+labels for ``hadoop-mapreduce'' were mined from commit histories that are today
+distributed across \emph{two} distinct git repositories, with \textbf{zero SHA
+overlap}. A single-repository build can therefore never see the whole labelled
+stream. The fix is to make the build engine resolve each commit from
+whichever repository contains it (a \emph{multi-repository} build), then rebuild
+the project on the full 1{,}321-commit stream.
+
+% ======================================================================
+\section{How the defect surfaced}
+% ======================================================================
+Two independent symptoms pointed at the same underlying problem:
+
+\begin{enumerate}
+  \item \textbf{Frozen progress at 39.7\%.} The per-commit build timing logs
+  under \code{logs/hadoop-mapreduce/} contained only 525 of the expected 1{,}321
+  rows for \emph{every} online-growth layer (AST/CFG/DFG/PDG/SEQ). This was
+  initially mistaken for a logging artifact; it was in fact the literal truth of
+  what the build processed.
+
+  \item \textbf{Missing diff text.} The per-project diff CSV
+  \code{data/apachejit/projects/apache\_hadoop-mapreduce\_diff.csv} had empty
+  \code{diff\_text} in 796 of 1{,}321 rows. Attempting to regenerate them from
+  the cloned \code{apache/hadoop-mapreduce} repository failed: git returned
+  \code{SHA <...> could not be resolved} for exactly those 796 commits.
+\end{enumerate}
+
+The number \emph{796} appearing in both symptoms ($796 + 525 = 1{,}321$) was the
+clue that a single cause underlay both.
+
+% ======================================================================
+\section{Root-cause investigation}
+% ======================================================================
+
+\subsection{The two repositories}
+\begin{center}
+\begin{tabular}{@{}lrl@{}}
+\toprule
+Repository & Commits & History span \\
+\midrule
+\code{apache/hadoop-mapreduce} (spin-off) & 960     & 2009-05-19 \ldots{} 2011-06-12 \\
+\code{apache/hadoop} (monorepo)           & 28{,}289 & 2009 \ldots{} 2019 (and ongoing) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\code{apache/hadoop-mapreduce} is a \emph{short-lived spin-off} repository. During
+2009--2011 the Hadoop project temporarily split its monolithic repository into
+sub-project repositories (\code{hadoop-common}, \code{hadoop-hdfs},
+\code{hadoop-mapreduce}). In 2011 these were folded back into the single
+\code{apache/hadoop} monorepo. The re-merge \textbf{rewrote history}: the same
+logical changes acquired \emph{new} commit SHAs in the monorepo, so the spin-off
+SHAs and the monorepo SHAs do not coincide.
+
+\subsection{The label partition}
+Resolving each of the 1{,}321 ApacheJIT-labelled commit SHAs against both
+repositories yields a clean, non-overlapping partition:
+
+\begin{center}
+\begin{tabular}{@{}lr@{}}
+\toprule
+Resolves in \ldots{} & Commits \\
+\midrule
+spin-off repository \emph{only} & 525 \\
+monorepo \emph{only}            & 796 \\
+both repositories               & 0 \\
+neither repository              & 0 \\
+\midrule
+total labelled                  & 1{,}321 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Consequently \emph{no single repository contains the full labelled set}. The
+original build used the spin-off repository (\code{repo\_subpath:
+repos/apache/hadoop-mapreduce}); it saw the 525 spin-off-only commits and
+silently skipped the 796 monorepo-only ones.
+
+\subsection{Why every layer was affected, not only CSTG}
+It is important to be precise about which inputs each layer reads, because it
+would be tempting (and wrong) to conclude that only the text/CSTG layer was hurt.
+
+\begin{itemize}
+  \item The \textbf{structural layers} (AST delta, CFG, DFG, PDG, SEQ) are built
+  by \emph{replaying commits from the git repository}: for each commit the engine
+  runs \code{git show <ref>:<path>} and \code{git diff --name-status} to recover
+  the changed files and their before/after blobs
+  (\code{build/build\_online\_kg.py}, \code{build/build\_subgraph\_online\_kg.py}).
+  If the commit SHA does not resolve in the repository, the commit contributes
+  \emph{no nodes and no edges} to any structural layer.
+
+  \item The \textbf{CSTG layer} reads commit text from the diff CSV
+  (\code{diff\_text}); those rows were also empty for the 796.
+\end{itemize}
+
+A direct query against the built graph confirmed the damage: of the 796
+monorepo-only commits, \textbf{zero} were present as
+\code{(:Commit \{in\_jit:true\})} nodes, and \textbf{zero} had any AST-delta
+edge (\code{ADDS}/\code{REMOVES}/\code{UPDATES}/\code{MOVES}). Only the 525
+spin-off commits were in the graph at all. The structural layers---the core of
+the method---were therefore built on 40\% of the intended stream.
+
+\subsection{Temporal structure of the mix}
+Although the two repositories jointly cover overlapping calendar years, the
+\emph{labelled} commit stream is almost perfectly segmented in time. Ordering
+the 1{,}321 labelled commits by author date and marking each as spin-off (S) or
+monorepo (M) yields only \textbf{15 S$\leftrightarrow$M transitions} over the
+whole stream:
+
+\begin{center}
+\begin{tabular}{@{}llrl@{}}
+\toprule
+Repo & Index range & $n$ & Date span \\
+\midrule
+S & [0000:0141]   & 142 & 2009-05-19 \ldots{} 2009-09-07 \\
+M & [0142:0142]   & 1   & 2009-09-07 \\
+S & [0143:0188]   & 46  & 2009-09-07 \ldots{} 2009-09-19 \\
+M & [0189:0189]   & 1   & 2009-09-19 \\
+S & [0190:0331]   & 142 & 2009-09-19 \ldots{} 2010-02-22 \\
+M & [0332:0332]   & 1   & 2010-02-25 \\
+S & [0333:0365]   & 33  & 2010-02-26 \ldots{} 2010-04-21 \\
+M & [0366:0366]   & 1   & 2010-04-22 \\
+S & [0367:0380]   & 14  & 2010-04-25 \ldots{} 2010-05-12 \\
+M & [0381:0381]   & 1   & 2010-05-14 \\
+S & [0382:0479]   & 98  & 2010-05-20 \ldots{} 2011-02-05 \\
+M & [0480:0480]   & 1   & 2011-02-09 \\
+S & [0481:0506]   & 26  & 2011-02-18 \ldots{} 2011-05-10 \\
+M & [0507:0507]   & 1   & 2011-05-10 \\
+S & [0508:0531]   & 24  & 2011-05-12 \ldots{} 2011-06-12 \\
+M & [0532:1320]   & 789 & 2011-06-13 \ldots{} 2019-11-27 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The stream is essentially: a long spin-off era (indices 0--531, seven lone
+monorepo commits sprinkled in), then a long pure-monorepo era (indices
+532--1320). This near-clean segmentation is what makes the fix low-risk (see
+\S\ref{sec:fix}).
+
+% ======================================================================
+\section{Decision}
+% ======================================================================
+Three remedies were considered:
+
+\begin{enumerate}
+  \item \textbf{Monorepo-only rebuild.} Point the build at \code{apache/hadoop}
+  and keep only the 796 commits that resolve there. \emph{Rejected}: it discards
+  the 525 spin-off-only commits (the entire 2009--2011 early era, 40\% of the
+  labelled set), silently redefining what ``hadoop-mapreduce'' means relative to
+  the other ApacheJIT projects and biasing every cross-project comparison.
+
+  \item \textbf{SHA remapping.} Attempt to locate each spin-off commit inside the
+  monorepo under its rewritten SHA (via patch-id or message/tree matching) and
+  relabel, then build entirely from the monorepo. \emph{Rejected as the primary
+  plan}: history rewriting during the re-merge does not guarantee a 1:1
+  patch-id mapping, so this risks dropping or mis-associating labels---a subtle,
+  hard-to-audit failure precisely in the region we are trying to repair.
+
+  \item \textbf{Multi-repository build (chosen).} Make the build engine resolve
+  each commit from whichever repository contains it, and rebuild on the full
+  1{,}321-commit stream. This is faithful to ApacheJIT's labelled set exactly as
+  published (same SHAs, same commits, none dropped, none relabelled), and it is a
+  one-time engine capability that also benefits any future split-history project.
+\end{enumerate}
+
+\textbf{Decision: adopt the multi-repository build.} Fidelity to the published
+labelled set is the decisive criterion---the experiments must be run on the
+commits ApacheJIT actually labelled, not on a convenient subset or a remapped
+approximation.
+
+% ======================================================================
+\section{The fix and its logic}
+\label{sec:fix}
+% ======================================================================
+
+\subsection{What the build engine does per commit}
+For each labelled commit, in chronological order, the online engine maintains a
+\code{file\_state} map: for every tracked \code{.java} file it stores the commit
+SHA at which that file was last seen. When a commit modifies a file, the engine
+diffs the file's \emph{previous} blob against its \emph{current} blob:
+
+\begin{lstlisting}
+before = git_bytes(file_state[path], path)   # file's PREVIOUS commit SHA
+after  = git_bytes(commit,          path)    # this commit's SHA
+\end{lstlisting}
+
+Both \code{git\_bytes(ref, path)} and \code{changed\_java\_files(commit)} issue
+\code{git -C REPO\_PATH <...>} against a \emph{single} repository. This is why a
+naive ``pick the right repo per commit'' is insufficient: the \code{before} blob
+may live in a \emph{different} repository than the \code{after} blob at the
+$\approx$7 spin-off/monorepo boundaries.
+
+\subsection{Multi-repository resolution}
+The fix introduces an \emph{ordered list} of repositories for a project and makes
+git access repository-aware:
+
+\begin{itemize}
+  \item \textbf{Config.} A project may declare additional repositories. For
+  \code{hadoop-mapreduce}:
+  \begin{lstlisting}
+repo_subpath:  repos/apache/hadoop-mapreduce  # primary: base + 525 early commits
+extra_repo_subpaths:
+  - repos/apache/hadoop                       # monorepo: 796 later commits
+  \end{lstlisting}
+  \code{project\_config} exposes these as an ordered \code{REPO\_PATHS} list
+  (primary first). Single-repository projects are unaffected: with no
+  \code{extra\_repo\_subpaths}, \code{REPO\_PATHS == [REPO\_PATH]} and behaviour
+  is byte-for-byte identical to before.
+
+  The \emph{spin-off} is chosen as primary because it owns the
+  \code{base\_commit} (\code{867a8565}, the earliest labelled commit,
+  2009-05-19): Phase~A builds the base AST snapshot by physically
+  \code{git checkout <base>} inside the primary repo and reading the working
+  tree, so the base must live there. The online growth phase then draws the 796
+  later commits from the monorepo via the fallback resolver.
+
+  \item \textbf{Commit-owning repo.} A helper resolves, and caches, which
+  repository contains a given commit SHA (\code{git cat-file -e <sha>}), so
+  \code{changed\_java\_files(commit)} runs against the repo that owns
+  \emph{that} commit.
+
+  \item \textbf{Blob fallback.} \code{git\_bytes(ref, path)} tries each
+  repository in \code{REPO\_PATHS} until \code{<ref>:<path>} resolves. In the
+  $>98\%$ of the stream that is a contiguous single-repo run, the first repo
+  hits immediately; only at the handful of boundaries does the fallback engage.
+  If a prior blob genuinely resolves in no repository (a possible boundary
+  artifact), the existing code already treats \code{before is None} as a safe
+  skip---no crash, no corruption.
+\end{itemize}
+
+\subsection{Base ingestion (Phase A2) is multi-repository too}
+A subtlety that was \emph{not} obvious at first: making only the online-growth
+git access (B5/B6) multi-repository is insufficient. The base ingestion step
+(A2, \code{ingest\_base\_kg\_and\_ast.py}) creates the \code{:Commit} nodes by
+streaming a repository's \code{git log}, and the labelling step (A4) only sets
+\code{in\_jit=true} on commits that \emph{already exist} as nodes
+(\code{MATCH (c:Commit \{id:...\})}). If A2 ingests only one repository, the 796
+monorepo commits never become nodes, A4 cannot label them, and the online layers
+then grow over just the 525 that do exist---exactly the original defect. A first
+rebuild attempt reproduced this: the graph still held only 525
+\code{in\_jit} commits.
+
+The fix therefore also makes A2 multi-repository, with an asymmetric,
+cost-aware policy:
+\begin{itemize}
+  \item the \textbf{primary} repository (the spin-off) is streamed in full, as
+  before, so the base graph keeps its unlabelled context commits;
+  \item each \textbf{secondary} repository (the monorepo) is streamed
+  \emph{labelled-commits-only}, via \code{git log --no-walk --stdin} fed the
+  labelled SHA set (one per line). This avoids ingesting the monorepo's
+  $\approx$28{,}000 unrelated commits (the project only needs its 796 labelled
+  ones from there). The SHAs are passed on \code{--stdin} rather than as
+  command-line arguments because 796 hashes ($\approx$32\,KB) exceed Windows'
+  command-line length limit (\code{WinError 206});
+  \item commits are de-duplicated by id across repositories (primary wins).
+\end{itemize}
+A2 now prints an explicit labelled-coverage line
+(\code{coverage 1321/1321}) and warns if any labelled commit is missing from all
+configured repositories---the guardrail called for in \S8.
+
+\subsection{Why this is low-risk}
+The near-clean temporal segmentation (\S3.4, only 15 transitions) means the
+stateful \code{before}/\code{after} diffing almost always stays within one
+repository. The cross-repo fallback is exercised only around $\approx$7 lone
+boundary commits, and its worst case degrades to the pre-existing, already-safe
+``skip this file's delta'' path. No change is made to the inference protocol, the
+fusion selection, or the scalability methodology; only the \emph{source of git
+blobs} during the build becomes multi-repository.
+
+\subsection{Ancillary fix: diff text}
+The \code{diff\_text} column of the per-project diff CSV was refilled by resolving
+each commit against whichever repository contains it (all 1{,}321 rows now
+populated). This restores full input coverage for the CSTG layer. The refill used
+the same local-git extraction logic as the original
+\code{scripts/build\_diffs.py} (no network calls).
+
+% ======================================================================
+\section{Consequences and required re-runs}
+% ======================================================================
+The \code{hadoop-mapreduce} artifacts produced before this fix are
+\textbf{invalid} and must be regenerated:
+
+\begin{itemize}
+  \item the Neo4j graph and its snapshot
+  (\code{outputs/hadoop-mapreduce/neo4j\_dump/}) were built on 525/1{,}321
+  commits;
+  \item the experiment results (\code{final\_experiments\_results.pkl},
+  \code{final\_fusion\_results.pkl}, subgraph RQ results), the chosen fusion
+  (previously reported as DW+CSTG), the scalability suite, and all rendered
+  tables/figures/notebooks derive from that partial graph.
+\end{itemize}
+
+The full remedy is therefore: rebuild all layers on the complete 1{,}321-commit
+multi-repository stream, then re-run experiments, scalability, reporting, and
+re-snapshot.
+
+% ======================================================================
+\section{Lessons and guardrails}
+\label{sec:guardrails}
+% ======================================================================
+\begin{enumerate}
+  \item \textbf{Coverage assertion.} The build should assert that the number of
+  \code{(:Commit \{in\_jit:true\})} nodes equals the number of labelled commits,
+  and fail loudly on a shortfall, rather than reporting success. A commit whose
+  SHA does not resolve in any configured repository must be an error, not a
+  silent skip.
+
+  \item \textbf{Provenance check before building.} For any new project, verify up
+  front that every labelled SHA resolves in the configured repositories (the
+  525/796 partition would have been caught immediately by such a check).
+
+  \item \textbf{Repository-split awareness.} ApacheJIT spans many Apache projects,
+  several of which underwent repository splits/merges. Any project whose labelled
+  SHAs do not all resolve in a single clone is a candidate for the same
+  multi-repository treatment.
+\end{enumerate}
+
+% ======================================================================
+\section{Second multi-repository case: \code{hadoop-hdfs}}
+\label{sec:hdfs}
+% ======================================================================
+The guardrail from \S\ref{sec:guardrails} above (\emph{provenance check before
+building}) paid off immediately on the next Hadoop sub-project. \code{hadoop-hdfs}
+is the sibling of \code{hadoop-mapreduce}: it went through the same 2009--2011
+spin-off/re-merge, so its ApacheJIT labels are likewise split across the
+\code{apache/hadoop-hdfs} spin-off and the \code{apache/hadoop} monorepo. This
+time the split was detected \emph{up front} by resolving every labelled SHA
+against both clones \emph{before} any build was started---so, unlike
+\code{hadoop-mapreduce}, no invalid single-repository graph was ever produced.
+
+\subsection{The label partition}
+Resolving each of the 2{,}907 \code{hadoop-hdfs} labelled SHAs against both
+repositories:
+
+\begin{center}
+\begin{tabular}{@{}lr@{}}
+\toprule
+Resolves in \ldots{} & Commits \\
+\midrule
+monorepo \emph{only}            & 2{,}304 \\
+spin-off repository \emph{only} & 461 \\
+both repositories               & 142 \\
+neither repository              & 0 \\
+\midrule
+total labelled                  & 2{,}907 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Two differences from \code{hadoop-mapreduce}}
+The same multi-repository engine (\S\ref{sec:fix}) handles \code{hadoop-hdfs}
+unchanged, but two properties differ and are worth recording:
+
+\begin{itemize}
+  \item \textbf{Non-empty intersection.} Here \textbf{142} commits resolve in
+  \emph{both} repositories (for \code{hadoop-mapreduce} the intersection was
+  empty). This is harmless: \code{git\_root\_for} probes \code{REPO\_PATHS} in
+  order and returns the first repository that resolves the SHA, so a
+  both-repositories commit is deterministically assigned to the primary. The
+  \code{before}/\code{after} blob fallback still works because both clones share
+  those objects.
+
+  \item \textbf{The spin-off must be primary --- because primary is streamed in
+  full.} Recall (\S\ref{sec:fix}) that A2 streams the \emph{primary} repository's
+  \emph{entire} \code{git log} (to keep unlabelled context commits) and streams
+  each \emph{secondary} repository labelled-commits-only. The primary must
+  therefore be the \emph{small} repository. A first \code{hadoop-hdfs} attempt
+  set the \emph{monorepo} primary (it resolves the majority of the stream and the
+  base commit), which seemed reasonable --- but full-streaming the
+  $\approx$28{,}289-commit monorepo with \code{git log -p --numstat --summary} was
+  prohibitively slow (16{,}000 commits in $\sim$76 minutes, and climbing) and
+  would have ingested tens of thousands of irrelevant commits. The build was
+  stopped and the configuration corrected to make the \emph{spin-off} primary
+  (1{,}134 commits, full-stream cheap), with the monorepo as the labelled-only
+  extra. The base commit (\code{4ba4f741d159e8\ldots}, 2009-05-19, 277 \code{.java}
+  files) resolves in \emph{both}, so Phase~A's \code{git checkout <base>} works on
+  the spin-off.
+  \begin{lstlisting}
+repo_subpath:  repos/apache/hadoop-hdfs  # primary: spin-off (SMALL; full-stream)
+extra_repo_subpaths:
+  - repos/apache/hadoop                  # monorepo: labelled-only (2,304)
+  \end{lstlisting}
+  \textbf{Rule of thumb:} the primary repository is whichever \emph{small} clone
+  owns (or shares) the base commit; the large monorepo is always a
+  \emph{labelled-only} secondary. Choosing primary by ``where most commits
+  resolve'' is a trap when that repository is a giant monorepo.
+\end{itemize}
+
+\subsection{Ancillary fix and a base-commit transcription trap}
+As with \code{hadoop-mapreduce}, the \code{diff\_text} column was refilled by
+resolving each commit against whichever repository contains it: 2{,}304
+previously-empty rows were populated (all 2{,}907 now complete), restoring CSTG
+input coverage.
+
+One process note for future setups: an initial \code{base\_commit} value was
+mis-transcribed by hand and resolved in \emph{neither} clone. Because
+\code{git\_root\_for(BASE\_COMMIT)} returned \code{None} during a pre-build
+configuration check, the error was caught \emph{before} the (multi-hour) Phase~A
+build rather than after---a concrete instance of why the provenance check
+(\S\ref{sec:guardrails}) belongs \emph{before} the build. Always derive the base SHA
+programmatically (\code{find\_base\_commit.py}) or copy it verbatim, and confirm
+\code{git\_root\_for(BASE\_COMMIT)} is non-\code{None} before building.
+
+% ======================================================================
+\section{A performance wall (not a defect): AST-write cost on a large graph}
+\label{sec:perfwall}
+% ======================================================================
+While building \code{hadoop-hdfs}, the AST-delta layer (B5) slowed to a crawl
+around commit 2{,}227 of 2{,}907, with individual commits taking \emph{minutes}
+each. This section records the investigation because the symptom (a build that
+looks ``stuck'') is alarming but the cause is a well-understood graph-database
+performance issue, \emph{not} a correctness defect in the multi-repository work.
+
+\subsection{First question: is the node count itself wrong?}
+The alarm was sharpened by an apparent anomaly: at only 76\% built,
+\code{hadoop-hdfs} already held \textbf{5.19\,M} \code{:ASTNode}s, \emph{more}
+than the fully-built \code{groovy} graph (3.70\,M) despite groovy having
+$\sim$3.6$\times$ more commits (8{,}059 vs 2{,}907). A natural worry was that the
+multi-repository build was \emph{double-counting}---e.g. re-bootstrapping whole
+file ASTs at each spin-off/monorepo boundary.
+
+That worry was tested directly and \textbf{rejected}. A ``bootstrap'' (the engine
+capturing an entire file's AST the first time a commit touches a file it is not
+yet tracking) is a normal part of the online-growth design, not a boundary
+artifact. Tagging each processed commit by its owning repository and correlating
+with bootstrap events showed the bootstraps are \emph{not} concentrated at the
+repo transitions:
+
+\begin{center}
+\begin{tabular}{@{}lr@{}}
+\toprule
+Bootstrap distribution (2{,}227 commits processed) & Count \\
+\midrule
+commits with $\geq 1$ bootstrap                 & 622 \\
+\quad occurring \emph{at} a repo transition     & 25 \\
+\quad occurring \emph{within} a same-repo run   & 597 \\
+repo transitions in the stream                  & 55 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Bootstraps begin at commit index~3 (a pure spin-off commit, well before any
+boundary) and are spread throughout. The high node count is therefore
+\emph{genuine}, and is explained by code volume, not a bug:
+
+\begin{center}
+\begin{tabular}{@{}lrr@{}}
+\toprule
+ & \code{groovy} (done) & \code{hadoop-hdfs} (76\%) \\
+\midrule
+\code{:ASTNode}s            & 3{,}699{,}439 & 5{,}194{,}906 \\
+distinct files              & 3{,}012       & 3{,}323 \\
+nodes / file                & 1{,}228       & 1{,}563 \\
+nodes / commit              & 459           & 2{,}333 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Two legitimate factors compound: \code{hadoop-hdfs} files are $\sim$27\% larger
+in AST terms (enterprise Java, bigger classes), and---dominantly---its commits
+touch $\sim$5$\times$ more AST \emph{per commit} (larger, more file-spanning
+changes). \textbf{Graph size tracks code volume changed, not commit count.} Of
+the 5.19\,M nodes, 3.42\,M (66\%) are full-file bootstrap nodes and 1.77\,M are
+delta nodes---consistent with a large, heavily-churned codebase. This is itself a
+useful scalability finding for RQ2.
+
+\subsection{Root cause of the slowdown: an unindexed liveness filter}
+The per-commit slowness (a single query observed running for
+\code{PT1M38S}) was traced to the two hot queries in
+\code{build\_online\_kg.py}---\code{load\_current\_ast} and \code{delete\_file}:
+
+\begin{lstlisting}
+MATCH (c:Commit {id:$cid}), (a:ASTNode {file:$file})
+WHERE coalesce(a.alive, true)
+...
+\end{lstlisting}
+
+An index existed on \code{ASTNode(file, pos\_line, pos\_col)}, which serves the
+\code{file} equality but returns \emph{all} nodes ever created for that
+file---including the many \emph{dead} versions accumulated over thousands of
+edits---and then filters \code{alive} in memory. For a hot HDFS file with
+hundreds of thousands of historical nodes, that in-memory filter dominates, and
+its cost \emph{grows with graph size}: exactly the ``missing-index'' cliff. This
+is a known Neo4j behaviour, independent of the multi-repository change (a
+single-repo project of the same size would hit it too).
+
+\subsection{The fix: a composite \code{(file, alive)} index}
+A composite index lets the planner filter both properties in the index and return
+only the live nodes for a file:
+
+\begin{lstlisting}
+CREATE INDEX astnode_file_alive IF NOT EXISTS
+FOR (a:ASTNode) ON (a.file, a.alive)
+\end{lstlisting}
+
+\textbf{Critically, the index alone is not enough---the query must also change.}
+The original predicate \code{coalesce(a.alive, true)} \emph{defeats} the index:
+Neo4j cannot turn a \code{coalesce(...)} wrapper into an index seek, so the
+planner falls back to a label/property scan even with the composite index
+present. The predicate must be the bare \code{a.alive = true} for the planner to
+choose \code{NodeIndexSeek}. This was confirmed by direct measurement on the
+hottest file in the resident graph (141{,}616 accumulated nodes; 42{,}540 live):
+
+\begin{center}
+\begin{tabular}{@{}lrl@{}}
+\toprule
+Predicate & Time & Plan \\
+\midrule
+\code{coalesce(a.alive, true)} & 67{,}214\,ms & scan (index unused) \\
+\code{a.alive = true}          & 437\,ms     & \code{NodeIndexSeek} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+A \textbf{154$\times$} speedup \emph{on this single isolated query} (the most-edited
+HDFS file had accumulated \textbf{141{,}616} AST-node versions over its history,
+which is what the old predicate scanned on every touch). This query runs once per
+changed file per commit, so it is \emph{a} major cost---but, importantly, not the
+only one (see \S\ref{sec:writecost}). Measured on the build itself (first
+$\sim$100 commits of the AST layer, like-for-like against the pre-fix run), the
+index fix roughly halved end-to-end per-commit time and, more importantly,
+\emph{eliminated the catastrophic tail}:
+
+\begin{center}
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+AST per-commit wall & median & mean & worst \\
+\midrule
+before any fix & $4.0$\,s & $12.8$\,s & $300$--$1130$\,s \\
+with index $+$ \code{a.alive=true} & $2.75$\,s & $5.5$\,s & $\sim$$60$\,s \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The tail collapse (worst commit $\sim$19\,min $\to$ $\sim$1\,min) is the decisive
+practical win: it turns an effectively-unbounded build into a finite one.
+
+The complete fix has three parts, all now in the build engines:
+\begin{itemize}
+  \item \textbf{Rewrite the predicate} from \code{coalesce(a.alive, true)} to
+  \code{a.alive = true} in every hot per-file liveness query
+  (\code{load\_current\_ast}, \code{delete\_file} in both
+  \code{build\_online\_kg.py} and \code{build\_subgraph\_online\_kg.py}; the
+  one-off report/count queries in \code{collect\_subgraph\_stats.py},
+  \code{ingest\_cstg.py}, \code{collect\_kg\_profile.py} were simplified for
+  consistency).
+  \item \textbf{Backfill} any \code{alive IS NULL} nodes to \code{true} at build
+  startup (base nodes from A2 may lack the property; there were 859 here). With
+  no nulls, \code{a.alive = true} is exactly equivalent to the old
+  \code{coalesce} semantics but index-seekable.
+  \item \textbf{Create the composite index at startup} via
+  \code{CREATE INDEX IF NOT EXISTS}, so every large project---\code{camel}
+  (22.7\,k commits), \code{ignite}, \code{flink}---benefits automatically rather
+  than hitting the same wall. The subgraph engine creates the per-label
+  equivalent (\code{<label>\_file\_alive}).
+\end{itemize}
+
+\subsection{A write-path optimisation that was attempted and reverted}
+\label{sec:writecost}
+Beyond the read query, a second cost was observed: a per-commit write transaction
+in \code{[Closing]} state holding $\approx$$50{,}974$ locks for $\sim$2 minutes.
+The AST inserts use \code{MERGE (a:ASTNode \{id:\ldots\})}, and since an
+\code{ASTNode.id} \emph{uniqueness constraint} already exists, the MERGE's
+read-before-write $+$ lock looked redundant; \code{CREATE} promised to be much
+cheaper. This was implemented (with per-commit checkpointing to keep resumes
+safe) \textbf{and then reverted}, for an instructive reason:
+
+\begin{quote}
+The base-style AST ids \code{\{file\}::A\{i\}} are deterministic \emph{per file},
+not per commit. A file that is deleted and re-added, or bootstrapped via two code
+paths, legitimately re-touches the same ids. \code{MERGE} is idempotent there;
+\code{CREATE} raised \code{Neo.ClientError.Schema.ConstraintValidationFailed} on a
+clean build. Only the \emph{delta} inserts (\code{\{file\}::D\{sha\}:\{i\}},
+commit-stamped) have truly-unique ids---too narrow a slice to justify the
+correctness risk. The engines were restored to \code{MERGE} everywhere; only the
+read-query fix above was kept.
+\end{quote}
+
+The lesson: an ``obvious'' \code{MERGE}$\to$\code{CREATE} swap is unsafe whenever
+node ids can legitimately recur; verify id lifetime before assuming uniqueness.
+The residual write cost remains, but with the read fix the build is finite and the
+tail is bounded, which was the blocking problem.
+
+\subsection{Operational lessons}
+\begin{itemize}
+  \item \textbf{Never bulk-\code{DELETE} a multi-million-node layer in one
+  transaction.} Running \code{build\_online\_kg.py --reset} on the resident
+  $5.2$\,M-node graph issued a single Cypher delete that \textbf{OOM-crashed
+  Neo4j} (\code{java.lang.OutOfMemoryError}, Bolt refusing connections). The graph
+  survived (the transaction rolled back on restart), but the reset did not
+  complete. To wipe a large project's store, use the \emph{store-level} wipe
+  (\code{reset\_neo4j.py}: stop container, \code{rm -rf} the DB files, restart),
+  which is $O(1)$ in memory, not a transaction.
+  \item \textbf{Transient Bolt drops on heavy commits are recoverable.} A drop
+  mid-write (\code{\_buffer\_one\_chunk}) leaves the checkpoint intact; the layer
+  resumes from \code{next\_index}. With the reverted \code{MERGE} engine, resume is
+  idempotent, so re-processing the last checkpoint window is safe; do \emph{not}
+  pass \code{--reset} to a resume.
+  \item \textbf{Measure the build, not an isolated query, and clear stale logs
+  first.} An early ``speedup'' reading was actually a \emph{stale}
+  \code{ast\_timing.csv} from a prior run; the real like-for-like comparison
+  (above) required deleting the log before re-measuring. Isolated-query speedups
+  ($154\times$) do not translate one-to-one to end-to-end build time.
+  \item \textbf{``Stuck'' vs ``slow'' is decided by the checkpoint, not the log.}
+  Forward progress is proven by \code{next\_index} advancing and by inspecting
+  \code{SHOW TRANSACTIONS} (elapsed time, \code{activeLockCount}) for a
+  long-running query---used here to tell a genuinely slow write from a hang.
+\end{itemize}
+
+\end{document}
