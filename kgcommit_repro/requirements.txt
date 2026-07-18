@@ -1,0 +1,36 @@
+# KG-Commit reproducibility package -- Python dependencies.
+# Python 3.10+ (developed on 3.13). Install:  pip install -r requirements.txt
+#
+# External (non-pip) prerequisites, NOT installed here:
+#   * Neo4j 5.x running at bolt://localhost:7687 (default auth neo4j/password1234;
+#     override per-project under config/projects.yaml -> neo4j:).
+#   * git on PATH (the build reads cloned repos via `git show`/`git diff`).
+#   * A cloned target repo at repos/apache/<project>/ and the ApacheJIT CSVs at
+#     data/apachejit/projects/apache_<project>{,_diff}.csv  (read in place).
+
+# --- graph store + git ---
+neo4j>=5.0
+GitPython>=3.1          # kg_commit.knowledge.dataloader uses `from git import Repo`
+
+# --- Java parsing (AST / CFG / DFG / PDG / SEQ builders) ---
+javalang>=0.13.0
+
+# --- config ---
+PyYAML>=6.0             # config/projects.yaml
+
+# --- scientific stack (inference, scalability, statistics) ---
+numpy>=1.24
+scipy>=1.10
+pandas>=2.0
+scikit-learn>=1.3
+networkx>=3.0
+
+# --- figures + notebooks ---
+matplotlib>=3.7
+nbformat>=5.9
+nbconvert>=7.0
+ipykernel>=6.0          # kernel used to execute the notebooks
+
+# --- optional (only if you regenerate the shallow node embeddings for one insight
+#     figure; the deployed DW/KGE methods are pure numpy and need nothing extra) ---
+# gensim>=4.3

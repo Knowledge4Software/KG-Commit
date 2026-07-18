@@ -1,0 +1,28 @@
+# ---------------------------------------------------------------------------
+# Template for adding a NEW Apache project "X" to the KG-Commit pipeline.
+#
+# Steps to add project X:
+#   1. Clone its repo to        repos/apache/X/        (read in place)
+#   2. Ensure the ApacheJIT CSVs exist:
+#        data/apachejit/projects/apache_X.csv          (labels + JIT metrics)
+#        data/apachejit/projects/apache_X_diff.csv      (diff text, for CSTG)
+#   3. Copy the block below into config/projects.yaml under `projects:`.
+#   4. Pick base_commit:   export KGC_PROJECT=X  &&  python find_base_commit.py
+#      then paste the printed SHA into base_commit below.
+#   5. Follow RUNBOOK.md.
+# ---------------------------------------------------------------------------
+
+projects:
+
+  X:                                   # <- the KGC_PROJECT name you will export
+    project_key: apache/X              # repo_map key for the Core-layer loader
+    repo_subpath: repos/apache/X       # cloned repo, relative to repo root (read in place)
+    base_commit: ""                    # first substantial Java commit (find_base_commit.py)
+    label_csv: data/apachejit/projects/apache_X.csv
+    diff_csv:  data/apachejit/projects/apache_X_diff.csv
+    output_namespace: X                # -> outputs/X/  and  outputs/X/scalability/
+    # Optional per-project Neo4j override (else inherits the top-level `neo4j:` block):
+    # neo4j:
+    #   uri: bolt://localhost:7687
+    #   user: neo4j
+    #   password: password1234
