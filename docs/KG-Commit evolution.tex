@@ -553,7 +553,34 @@
 		\caption{Left: AST-change size (log delta edges) for benign vs.\ buggy commits.
 			Right: yearly bug rate, showing pronounced concept drift.}\label{fig:signal}
 	\end{figure}
-	
+
+	\paragraph{Why every online trajectory declines toward the final commits.}
+	The per-year bug rate (\code{scalability/collect\_growth\_stats.py}, computed
+	directly from the labelled commits) rises from $5.8\%$ (2003) to a peak of
+	$39.0\%$ (2012), then falls steadily back to $9.5\%$ (2018) and $5.8\%$ (2019)
+	--- essentially the 2003 level. This single fact, not a failure of any method,
+	is what drags down \emph{every} rolling-window metric at the right edge of
+	every trajectory figure in this document (Figures~\ref{fig:curves},
+	\ref{fig:v1v2v3}, \ref{fig:v3traj}, \ref{fig:v4-final-streams} and their
+	analogues): (i)~PR-AUC's achievable ceiling is bounded by the positive rate, so
+	as positives thin out even a perfect model's PR-AUC shrinks; (ii)~a
+	\code{ROLL}$=800$-commit rolling window at a $6\%$ rate contains only
+	$\approx$$48$ positives versus $\approx$$310$ at the 2012 peak, so
+	precision/recall/F1/MCC become noisier and, since the model's expanding-window
+	training still carries substantial mass from the high-bug-rate middle years,
+	systematically \emph{over-predict} ``buggy'' in this low-defect tail (the same
+	miscalibration documented for the controlled $2018$--$2019$ split,
+	\S\ref{sec:closeout}, \S\ref{sec:roadmapB}); (iii)~ROC-AUC is comparatively more
+	robust to the rate itself but still dips because the relational/structural
+	priors are seeded from the same rare, less-informative recent positives. This
+	is a real property of the Groovy history, not an artefact of one model: every
+	baseline and every KG variant declines together into the tail
+	(Figure~\ref{fig:v1v2v3}), which is precisely why the fully-online prequential
+	protocol --- rather than a single static split --- is used throughout: it is
+	designed to \emph{expose} concept drift rather than hide it, and the
+	meaningful comparison in that regime is \emph{relative} (which curve declines
+	least / stays on top), not the absolute end-of-stream value.
+
 	% ===========================================================================
 	\section{Audit and Data Quality of the Finalized KG}\label{sec:audit}
 	% ===========================================================================
@@ -3068,6 +3095,192 @@
 		\label{fig:v4-final-fusion-part2}
 	\end{figure}
 
+	\subsection{Final CSTG questions}\label{sec:v4-cstg-qa}
+	Before porting the methodology to other projects, four questions about the
+	deployed CSTG channel ($G$) need unambiguous answers --- for our own
+	cross-project replication and for a Q1 reviewer auditing the online-JIT claim.
+	We answer each directly against the code
+	(\code{inference/cstg.py}, \code{cstg\_online\_features.py},
+	\code{ingest\_cstg.py}), not from the surrounding prose alone.
+
+	\paragraph{Q1: Is the CSTG's word-graph/statistics update scope the current
+	window only, all previous windows, or all data (i.e., is there leakage)?}
+	Three distinct mechanisms have three distinct scopes, and only one of them
+	looks superficially suspicious:
+	\begin{itemize}[nosep,leftmargin=1.4em]
+		\item \textbf{Per-commit graph-of-words (TextRank centrality).} Built from
+		\emph{that one commit's} tokens only --- no cross-commit state at all.
+		\item \textbf{NPMI co-occurrence graph and the propagated term-risk prior.}
+		Grown over an \emph{expanding, strictly-past window}: commit $i$ is scored
+		using \code{prop} (the last NPMI-propagation refresh, every
+		\code{PROP\_REFRESH}$=400$ commits) computed from commits $<i$ only; its own
+		tokens are folded into the running counters (\code{tb}, \code{tt}, \code{pair})
+		\emph{after} scoring (predict-then-grow, the same protocol as every other
+		online signal in the KG). This is never fit on ``all data.''
+		\item \textbf{\code{HashingVectorizer} (turns polarity-tagged tokens into
+		sparse features).} Applied to the whole document array at once, which can
+		look like a full-corpus fit at a glance --- but it is \emph{stateless}: a
+		fixed hash function with no learned vocabulary or IDF, so it cannot leak
+		information from a later commit into an earlier row. It is included here
+		explicitly so the ``applied to all docs'' line in the code is not mistaken
+		for a leak on a future audit.
+	\end{itemize}
+	\textbf{Answer: past-only (expanding window), never all-data.} The controlled-split
+	number in Table~\ref{tab:cstg} (\code{cstg.py::CSTG.fit} on a single $70/30$
+	\code{train\_idx}) is a separate, explicitly-labelled comparison against the
+	published baseline and is \emph{not} the deployed predictor; the deployed
+	predictor is the fully prequential path
+	(\code{cstg\_online\_features.build\_online\_streams}) reported in
+	Table~\ref{tab:cstgonline} and used in $G$ above.
+
+	\paragraph{Q2: How are CSTG nodes/edges constructed, what is the theoretical
+	basis, and is it defensible as a completely online, commit-level approach?}
+	Terms are tokenised from the commit message and the added/removed diff text
+	(camelCase/snake\_case split, stopword and generated-parser-noise removal,
+	\code{min\_df}$\ge3$ on past commits only); \edge{MENTIONS} edges connect a commit
+	to its top-$20$ terms by \emph{TW-IDF} (TextRank centrality $\times$ IDF, not raw
+	frequency); \edge{COOCCURS} edges connect term pairs by \emph{NPMI} over past
+	co-occurrence; \edge{GROUNDS\_IN}/\edge{REFERS\_TO} cross-link a code term to the
+	\node{ASTNode}/\node{File} it names. Each piece has a standard citation already
+	given in \S\ref{sec:cstg}: graph-of-words/TW-IDF (Rousseau \& Vazirgiannis,
+	CIKM'13), the NPMI corpus term graph (cf.\ TextGCN, Yao et al., AAAI'19),
+	defect-semantic typing, and term-risk propagation (label-propagation /
+	spreading-activation). \textbf{This is defensible as a fully online, commit-level
+	method} precisely because every statistic used at prediction time is grown
+	predict-then-grow from strictly earlier commits and the per-commit graph is
+	commit-local (Q1). The one claim we do \emph{not} make is that the
+	graph-of-words \emph{centrality math itself} is what wins (Q4) --- the defensible
+	claim is that the \emph{structured, typed, code-grounded, online-propagated
+	layer} beats the strongest text baseline and adds fusion lift, which is a claim
+	about the representation, not about TextRank outperforming term frequency.
+
+	\paragraph{Q3: What are the CSTG node/edge types in detail, and do they make
+	sense in a completely online setting?} Node types: \node{Term}
+	\{\code{text}, \code{kind}$\in$\{code, bug, action, error, nl\}, \code{risk}\}
+	($20{,}377$ in Groovy) and \node{Intent} ($8$, change-intent typing). Edge types:
+	\edge{MENTIONS} (Commit$\rightarrow$Term, $188{,}435$), \edge{COOCCURS}
+	(Term$\rightarrow$Term, $120{,}340$), \edge{GROUNDS\_IN} (Term$\rightarrow$ASTNode,
+	$19{,}315$), \edge{REFERS\_TO} (Term$\rightarrow$File, since deleted as redundant,
+	\S\ref{sec:cstgfinal}), and \edge{HAS\_INTENT} (Commit$\rightarrow$Intent,
+	$8{,}059$). \edge{MENTIONS}, \edge{HAS\_INTENT} and \edge{GROUNDS\_IN} are all
+	written at a commit's arrival from its own text/code, so they are trivially
+	online. \edge{COOCCURS} and \node{Term.risk}, however, are corpus-derived and
+	evolve over time; \textbf{one distinction is worth stating precisely so it is
+	never conflated}: the \emph{Neo4j-ingested} \edge{COOCCURS} graph and
+	\code{Term.risk} property (\code{ingest\_cstg.py}) are written \emph{once from
+	the final fitted state}, for querying and visualisation
+	(Figures~\ref{fig:cstg-cooc}--\ref{fig:cstg-terms}) --- they are a static snapshot,
+	not something the online predictor reads. The \emph{deployed feature path}
+	(\code{cstg\_online\_features.py}) recomputes its own NPMI graph and propagated
+	risk online, from scratch, on past-only counters (Q1). A reviewer inspecting the
+	Neo4j schema should not mistake the static visualisation snapshot for the online
+	predictor's state.
+
+	\paragraph{Q4: In the CSTG ablation, why does plain TF-IDF outperform the full
+	CSTG, and is this a weakness?} It is already reported honestly
+	(\S\ref{sec:cstg}, Figure~\ref{fig:cstg-abl}) and is not a weakness once the
+	comparison is read at the right granularity, but it is the single most
+	reviewer-sensitive result in this layer, so we restate it precisely here and
+	close the one gap the original ablation had: a \emph{same-learner},
+	matched-vocabulary TF-IDF row (\code{scalability/collect\_cstg\_ablation.py},
+	Table~\ref{tab:cstg-ablation}, Figure~\ref{fig:cstg-ablation-internal}).
+	\emph{Under a linear learner} (the original component-isolation ablation,
+	right panel of Figure~\ref{fig:cstg-ablation-internal}): graph-of-words
+	weighting alone (TW-IDF) reaches ROC $0.746$, which does \emph{not} beat plain
+	TF-IDF ($0.769$); adding the NPMI-propagated prior recovers only a little
+	($0.752$). \emph{Under the matched, non-linear learner} (Random Forest, left
+	panel): the gap essentially closes --- plain TF-IDF ($0.818$), TW-IDF
+	($0.817$), and the full CSTG ($0.821$) are within noise of one another; only
+	\textbf{JIT $+$ full CSTG} ($0.827$) clears the published external baseline
+	($0.813$) by a margin worth reporting. \textbf{This changes the precise claim
+	we make, and we state it honestly:} the full CSTG representation's advantage
+	over a plain bag-of-words baseline, \emph{on this controlled batch split, under
+	a matched learner, is small} --- the decisive wins for CSTG are (i)~combining
+	with the JIT metrics (which plain TF-IDF was never evaluated with in the
+	published baseline) and, far more importantly, (ii)~the true online protocol,
+	where CSTG-alone reaches ROC $0.821$ / PR-AUC $0.588$
+	(Table~\ref{tab:cstgonline}) because plain TF-IDF has no relational-propagation
+	or recency mechanism to draw on across the commit stream --- an advantage a
+	single static batch split cannot exercise. \textbf{Two honest consequences we
+	act on:} (i)~we never claim ``TextRank-weighting beats term-frequency-weighting
+	on this batch split'' --- the matched-learner result shows they are
+	statistically indistinguishable here; the defensible claim is that the
+	structured, typed, propagated, \emph{online} layer beats a flat bag-of-words
+	baseline where it matters, i.e.\ under the deployment protocol; (ii)~the
+	original component-isolation ablation mixed a linear learner (for component
+	isolation) with a non-linear learner (for the full-representation number),
+	which was a fair within-component comparison but not a fair TW-IDF-vs-TF-IDF
+	comparison under one learner --- Table~\ref{tab:cstg-ablation} now reports both
+	on record so neither the batch-split similarity nor the online-protocol
+	advantage can be selectively quoted out of context.
+
+	\input{figures/v4/scalability/tab_cstg_ablation.tex}
+
+	\begin{figure}[H]\centering
+		\includegraphics[width=\linewidth]{v4/scalability/fig_cstg_ablation}
+		\caption{CSTG internal-layer ablation on the controlled split. \textbf{Left:}
+		matched Random-Forest comparison --- plain TF-IDF, TW-IDF and the full CSTG
+		are statistically close; only JIT$+$CSTG clears the published baseline
+		(dashed). \textbf{Right:} the original balanced-LR component-isolation view,
+		where TW-IDF alone $\approx$ TF-IDF. Read together, the two panels show the
+		CSTG's batch-split edge is modest and the layer's real advantage is realised
+		online (Table~\ref{tab:cstgonline}), not in this static
+		comparison.}\label{fig:cstg-ablation-internal}
+	\end{figure}
+
+	\paragraph{Q5: How do the five graph-inference methods behave on the CSTG's own
+	graph, layer by layer, and how do they compare to the $G$ feature channel?}
+	The batch ablation above treats the CSTG as a \emph{feature matrix}. But the
+	CSTG is also a \emph{graph} --- \node{Commit}$\rightarrow$\node{Term} mentions,
+	\node{Term}$\leftrightarrow$\node{Term} NPMI edges, typed terms --- so we run the
+	same five final graph-inference methods (RN, PPR, LP, DW, KGE) over it, fully
+	online, exactly as in the V4 subgraph family, to see which \emph{separated CSTG
+	layer} carries the signal and how the graph-native methods compare to the
+	feature-based $G$ channel (\code{scalability/cstg\_online\_graph\_ablation.py},
+	Table~\ref{tab:cstg-graph-ablation}, Figure~\ref{fig:cstg-graph-ablation}). Each
+	column adds one CSTG mechanism on top of the Core file/developer graph: unweighted
+	term hubs (\edge{MENTIONS}), TW-IDF-weighted term hubs, the \edge{COOCCURS} NPMI
+	term--term edges (so the walks diffuse through the semantic graph), and finally
+	term-kind typing (the full CSTG). Three findings, all reported honestly:
+	\begin{itemize}[nosep,leftmargin=1.4em]
+		\item \textbf{PPR is the best graph method, and it is the plain term hubs ---
+		not the weighting or the higher-order structure --- that help it.} PPR rises
+		from AUC $0.728$ (Core) to its \emph{best} $0.757$ (MCC $0.280\!\to\!0.300$)
+		simply by adding \emph{unweighted} \edge{MENTIONS} term hubs. This is
+		consistent with PPR being the strongest cell on every graph in the V4 study:
+		what the CSTG contributes to the walk is the commit--term connectivity itself.
+		\item \textbf{Neither TW-IDF weighting nor the higher-order graph structure
+		adds anything for the graph methods --- if anything they slightly hurt.}
+		TW-IDF-weighting the term hubs \emph{lowers} PPR to AUC $0.743$, and adding the
+		\edge{COOCCURS} NPMI edges and term-kind typing leaves it flat ($0.744$).
+		For random-walk and embedding methods the raw term connectivity already
+		carries the signal; re-weighting by centrality and diffusing through the
+		term--term graph do not add separable information --- an honest null result for
+		the higher-order graph mechanisms in this online, prediction-time setting.
+		\item \textbf{The $G$ feature classifier beats every graph method on the same
+		CSTG signal} (AUC $0.789$ vs.\ PPR's best $0.757$; MCC $0.320$ vs.\ $0.300$).
+		This is the decisive result and it \emph{validates the deployed design}: the
+		CSTG's semantic evidence is better exploited by an explicit feature classifier
+		($G$, fused on top of $F$) than by routing it through graph walks over term
+		hubs --- which is exactly why the deployed model is $F{+}G$ with $G$ as a fused
+		channel (\S\ref{sec:v4-finalfusion}), rather than folding CSTG hubs into the
+		five methods and stopping there.
+	\end{itemize}
+
+	\input{figures/v4/scalability/tab_cstg_graph_ablation.tex}
+
+	\begin{figure}[H]\centering
+		\includegraphics[width=\linewidth]{v4/scalability/fig_cstg_graph_ablation}
+		\caption{CSTG online graph ablation. Each panel tracks a metric as the CSTG
+		graph is enriched Core\,$\rightarrow$\,$+$MENTIONS\,$\rightarrow$\,$+$TW-IDF\,
+		$\rightarrow$\,$+$COOCCURS\,$\rightarrow$\,Full, for the five graph methods
+		(PPR bold); the dashed line is the graph-independent $G$ feature classifier.
+		Plain (unweighted) term hubs give PPR its best result; TW-IDF weighting and
+		the higher-order graph structure do not help the graph methods; and $G$ sits
+		above every graph method --- the reason the deployed model fuses $G$
+		explicitly rather than relying on CSTG hubs alone.}\label{fig:cstg-graph-ablation}
+	\end{figure}
+
 	% =======================================================================
 	\section{Scalability, Complexity and Statistical Analysis}\label{sec:scal}
 	% =======================================================================
@@ -3191,6 +3404,197 @@
 	headline accuracy gaps are therefore not noise.
 
 	\input{figures/v4/scalability/tab_significance.tex}
+
+	% =======================================================================
+	\section{Reproducibility Package and Cross-Project Pipeline}\label{sec:repro}
+	% =======================================================================
+	The final methodology is packaged as a standalone, publishable code artifact
+	(\code{kgcommit\_repro/}) that reconstructs \emph{everything} in this paper ---
+	from reading a cloned repository and the ApacheJIT labels, through building the
+	full knowledge graph in Neo4j, to running every experiment and rendering every
+	table, figure, and notebook --- for \emph{any} Apache project, \textbf{one
+	project at a time}. The package deliberately contains \emph{only} the final (V4)
+	methodology; the superseded V1--V3 experimentation, legacy builders, and one-off
+	audits that appear earlier in this document are excluded. This section documents
+	what the package contains, how to run the full pipeline on a new project, where
+	each input is read from, and the operational facts a reader must know.
+
+	\subsection{What the package contains}\label{sec:repro-contents}
+	The artifact mirrors the three stages of the methodology --- \emph{build},
+	\emph{inference}, \emph{analysis} --- as three script folders, plus a
+	single-source-of-truth configuration, four thin orchestration drivers, and two
+	setup helpers. Every script reads its project-specific values (repository path,
+	base commit, label/diff CSVs, output namespace, Neo4j credentials) from one
+	module, \code{config/project\_config.py}, which resolves them from a per-project
+	registry (\code{config/projects.yaml}) keyed by the \code{KGC\_PROJECT}
+	environment variable. Nothing is hard-coded to a single project.
+
+	\paragraph{Build (\code{build/}) --- the ten ordered steps that grow the graph.}
+	\begin{description}[nosep,leftmargin=1.2em]
+		\item[\code{build\_file\_ast\_graphs.py}] parses every \code{.java} file at the
+		base commit into a file-level AST graph (pickles under
+		\code{outputs/<p>/file\_ast\_graphs/}). \emph{Reads} the cloned repo;
+		\emph{writes} pickles.
+		\item[\code{ingest\_base\_kg\_and\_ast.py}] ingests the Core process/relational
+		layer (\node{Commit}/\node{File}/\node{Developer}/\node{Issue} and their edges,
+		via the \code{kg\_commit/knowledge} library) and attaches the base AST under
+		each \node{File}. \emph{Reads} repo $+$ base pickles; \emph{writes} Neo4j.
+		\item[\code{add\_positions\_to\_astnodes.py}] stamps \code{pos\_line}/
+		\code{pos\_col} on the base AST nodes. \emph{Reads} repo $+$ Neo4j;
+		\emph{writes} Neo4j.
+		\item[\code{apply\_commit\_labels.py}] applies the ApacheJIT \code{buggy}
+		labels, the twelve JIT change-metrics, \code{author\_ts}, and \code{in\_jit} to
+		the \node{Commit} nodes. \emph{Reads} the project label CSV; \emph{writes} Neo4j.
+		\item[\code{build\_online\_kg.py}] the AST online-growth engine: streams the
+		labelled commits in \code{author\_ts} order and writes the delta layer
+		(\edge{ADDS}/\edge{REMOVES}/\edge{UPDATES}/\edge{MOVES}), evolving one stored AST
+		per file. \emph{Reads} repo $+$ Neo4j $+$ a resumable checkpoint; \emph{writes}
+		Neo4j, the checkpoint, and --- with \code{-{-}timing-log} --- one CSV row per
+		commit.
+		\item[\code{build\_subgraph\_online\_kg.py}] the same engine parametrised for the
+		alternative structural layers; run once per \code{-{-}kind} in
+		$\{$\code{cfg},\code{dfg},\code{pdg},\code{seq}$\}$. \emph{Writes} the
+		\node{CFGNode}/\node{DFGNode}/\node{PDGNode}/\node{SEQNode} layers, a per-kind
+		checkpoint, and its own per-commit timing CSV.
+	\end{description}
+	Support modules (imported, not run standalone): \code{online\_ast\_diff.py} (the
+	javalang-native tree differ), \code{subgraph\_diff.py} and
+	\code{subgraph\_builders.py} (the shared graph differ and per-file builders),
+	\code{subgraph\_spec.py}, and the \code{kg\_commit/knowledge} package that
+	materialises the Core layer.
+
+	\paragraph{Build (\code{build/}) --- the CSTG semantic-text layer.}
+	Three further steps complete the graph:
+	\code{inference/validate\_cstg.py} fits the CSTG model and caches it
+	(\code{outputs/<p>/cstg\_bundle.pkl}); \code{inference/ingest\_cstg.py -{-}ground}
+	writes the \node{Term} vocabulary and the \edge{MENTIONS}/\edge{COOCCURS}/
+	\edge{GROUNDS\_IN} edges into Neo4j; and \code{inference/ingest\_cstg\_enrich.py}
+	adds the change-intent typing (\node{Intent}, \edge{HAS\_INTENT}).
+
+	\paragraph{Inference (\code{inference/}) --- the deployed models and renderers.}
+	\code{run\_final\_experiments.py} runs the five graph-inference methods
+	(RN, PPR, LP, DW, KGE) on the six-graph family and writes
+	\code{final\_experiments\_results.pkl}; \code{run\_final\_fusion.py} evaluates all
+	$31$ method combinations and the $F$/$F{+}G$/$F{+}M$ variants, writing
+	\code{final\_fusion\_results.pkl}; \code{run\_subgraph\_rq.py} and
+	\code{run\_kg\_methods\_rq.py} produce the subgraph-ablation result pickles; and
+	\code{collect\_subgraph\_stats.py} writes the per-layer structural
+	\code{subgraph\_layer\_stats.json}. The supporting libraries are
+	\code{kg\_methods.py} (the five methods), \code{online\_jit.py} (the prequential
+	protocol and the seven-metric \code{final\_metrics}), \code{online\_infer.py} (the
+	fixed protocol constants: warm-up $40\%$, block $200$), \code{advanced\_infer.py}
+	(the read-only Neo4j loader), \code{effort\_metrics.py} (the effort-aware
+	metrics), and the CSTG feature builders \code{cstg.py},
+	\code{cstg\_online\_features.py}, \code{cstg\_consistency.py}. The renderers
+	(\code{make\_final\_experiments\_report.py}, \code{make\_final\_fusion\_tables.py},
+	\code{make\_paper\_table.py}, \code{make\_metrics\_tables.py},
+	\code{make\_metrics\_figures.py}, \code{make\_subgraph\_tables.py},
+	\code{make\_subgraph\_figures.py}) and the notebook builders
+	(\code{build\_final\_experiments\_notebook.py}, \code{build\_subgraph\_notebook.py})
+	are cache-only: they read the result pickles and emit \code{.tex} tables,
+	figures, and executed notebooks with no live database.
+
+	\paragraph{Analysis (\code{scalability/}) --- the second research question.}
+	Under a shared helper (\code{\_common.py}) the suite computes the KG statistical
+	profile (\code{collect\_kg\_profile.py}), the per-commit online growth and
+	concept-drift analysis (\code{collect\_growth\_stats.py}), the build/modify
+	time--space complexity from the per-commit timing logs and a sampled parse/diff
+	replay (\code{time\_build\_replay.py}), the prediction-time latency
+	(\code{time\_prediction.py}), the statistical-significance tests
+	(\code{stat\_tests.py}: DeLong, paired bootstrap, Holm, Cliff's $\delta$), and the
+	two CSTG ablations (\code{collect\_cstg\_ablation.py},
+	\code{cstg\_online\_graph\_ablation.py}). The renderers
+	(\code{make\_scalability\_tables.py}, \code{make\_scalability\_figures.py},
+	\code{make\_insight\_figures.py}) and notebook builders
+	(\code{build\_scalability\_notebook.py}, \code{build\_insight\_notebook.py})
+	produce the scalability tables, figures, and the two analysis notebooks.
+
+	\paragraph{Notebooks.} Four final notebooks are (re)generated per project:
+	\code{final\_experiments.ipynb} (five methods $\times$ six graphs $+$ fusion),
+	\code{subgraph\_ablation\_v4.ipynb} (the which-subgraph study),
+	\code{scalability\_v4.ipynb} (the E1--E5 analysis), and
+	\code{additional\_experiments\_visualizations.ipynb} (the insight and CSTG-graph
+	ablation figures).
+
+	\paragraph{Where each experiment's results go.} All generated artifacts are
+	\emph{namespaced by project} so that building one project never clobbers another:
+	result pickles, caches, and checkpoints under \code{outputs/<project>/}; the
+	scalability JSON/TeX under \code{outputs/<project>/scalability/}; figures under
+	\code{outputs/<project>/figures/}; tables under \code{outputs/<project>/tables/};
+	executed notebooks under \code{outputs/<project>/notebooks/}; and the per-commit
+	build timing CSVs under \code{kgcommit\_repro/logs/<project>/}.
+
+	\subsection{Running the full pipeline on a new project \texorpdfstring{$X$}{X}}\label{sec:repro-run}
+	Four thin drivers orchestrate the stages; each inherits the active project from
+	\code{KGC\_PROJECT} and runs \emph{one} project (there is no loop over projects ---
+	the intent is to build a light project, inspect its results, then proceed). The
+	sequence for a new project $X$ is:
+	\begin{enumerate}[nosep,leftmargin=1.4em]
+		\item \textbf{Register $X$}: clone its repository to \code{repos/apache/X/},
+		ensure its ApacheJIT CSVs exist, and copy the template block from
+		\code{config/projects.template.yaml} into \code{config/projects.yaml}.
+		\item \textbf{Select it}: set \code{KGC\_PROJECT=X}.
+		\item \textbf{Choose its base commit}: run \code{python find\_base\_commit.py},
+		which scans the earliest labelled commits and prints the first one with a
+		substantial number of \code{.java} files (the ``start-from-zero'' point); paste
+		the printed SHA into \code{projects.yaml}. (This generalises the procedure used
+		to fix Groovy's base commit.)
+		\item \textbf{Reset the database}: if a \emph{different} project is currently
+		built, run \code{python reset\_neo4j.py -{-}yes} (see \S\ref{sec:repro-notes}).
+		\item \textbf{Build} the graph: \code{python drivers/build\_project.py}
+		(Phase A$\to$B$\to$C, writing the per-commit timing logs). A \code{-{-}limit}
+		flag caps the commit count for a smoke test.
+		\item \textbf{Experiment}: \code{python drivers/run\_experiments.py} (reads the
+		just-built live graph).
+		\item \textbf{Analyse}: \code{python drivers/run\_scalability.py} (read-only /
+		cache-based).
+		\item \textbf{Render}: \code{python drivers/make\_reports.py} (tables, figures,
+		executed notebooks).
+	\end{enumerate}
+	Because Groovy is the largest of the pre-cloned projects, we recommend building the
+	\emph{light} projects first (zookeeper, $839$ commits; zeppelin, $1{,}451$; kafka,
+	$2{,}384$) to validate the pipeline before the heavy ones. The full annotated
+	command sequence, per-step outputs, and single-step invocations are in the
+	package's \code{RUNBOOK.md}; the overview is in \code{README.md}.
+
+	\subsection{Where the data is read from (in place)}\label{sec:repro-data}
+	The package \emph{never} copies the multi-gigabyte inputs; it reads them in place
+	from the surrounding checkout, by path resolved in \code{project\_config.py}
+	relative to the parent-repo root. For a project $X$: the cloned source is read from
+	\code{repos/apache/X/} (via \code{git show}/\code{git diff}); the ApacheJIT labels
+	and JIT metrics from \code{data/apachejit/projects/apache\_X.csv}; and the
+	diff-text used by the CSTG layer from
+	\code{data/apachejit/projects/apache\_X\_diff.csv}. Both CSV families ship with the
+	dataset for all fifteen ApacheJIT projects. Only \emph{generated} artifacts are
+	written, and only under the per-project \code{outputs/<project>/} namespace.
+
+	\subsection{What a reader must know}\label{sec:repro-notes}
+	\begin{itemize}[nosep,leftmargin=1.4em]
+		\item \textbf{Neo4j is single-tenant.} Graph nodes are not project-tagged and
+		the online build streams \code{MATCH (c:Commit \{in\_jit:true\})} globally, so
+		the database holds \emph{one project's graph at a time}. Switching projects
+		\emph{requires} a full wipe first (\code{reset\_neo4j.py -{-}yes}), which clears
+		the graph and the active project's build checkpoints but leaves every project's
+		on-disk \code{outputs/} intact.
+		\item \textbf{The build timing logs are first-class data.} Each online-growth
+		step appends one row per commit
+		(\code{idx, sha, files, adds/removes/updates/moves, wall\_ms}) to
+		\code{logs/<project>/<layer>\_timing.csv}. These are the primary input to the
+		build/growth complexity analysis (the second research question) and must be
+		preserved; the package captures them automatically via the drivers.
+		\item \textbf{Reruns are database-free.} After the first build and experiment
+		run, the heavy feature streams, hub dictionaries, and result pickles are cached
+		under \code{outputs/<project>/}, so the renderers and most of the scalability
+		suite reproduce every table and figure without a live database.
+		\item \textbf{The protocol is fixed across projects.} The prequential warm-up
+		($40\%$), block size ($200$), the seven-metric evaluation suite, and the
+		deployed model \mbox{$F{+}G=$~RN$+$PPR$+$CSTG} are identical for every project
+		by design; only the data varies. This is what makes cross-project results
+		comparable.
+		\item \textbf{Base-commit choice is the one manual step per new project.} It is
+		recorded explicitly in \code{projects.yaml} (not auto-edited) so the choice is
+		auditable; \code{find\_base\_commit.py} only \emph{suggests} it.
+	\end{itemize}
 
 	% =======================================================================
 	\section{Algorithms}\label{sec:algorithms}
