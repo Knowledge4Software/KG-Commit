@@ -27,13 +27,12 @@ only, or fewer projects); \TODO\ = not yet produced. The \Cone/\Ctwo/\Cthree/\Cf
 tags are the \emph{generation cost} (unchanged); the right-hand status is
 \emph{what is on disk now}. Layout note: appendices are filed under
 \code{paper\_material/appendices/<Letter>\_.../} and discussions under
-\code{paper\_material/discussions/D<n>\_.../}. \textbf{Headline (\today, after the
-C3 pass): all seven active projects complete across every RQ, Discussion, and
-Appendix. The three previously-open gaps are now closed --- (i)~RQ2/App-M scalability
-for cassandra+groovy filed (7/7); (ii)~zookeeper stale cache refreshed via
-dump-restore, so App-F, App-H(M/G), D3(M/G) are 7/7; (iii)~Appendix~L authored (4
-self-contained HTML pages). The only remaining item is Appendix~N (placeholder,
-awaiting the frozen algorithm set).}}}
+\code{paper\_material/discussions/D<n>\_.../}. \textbf{Headline (\today): the active set
+is now NINE projects --- hadoop-hdfs and hadoop-mapreduce were restored, re-run
+(experiments + fusion + matrices + sweeps + CSTG/fusion-head ablations + probe +
+streams, both settings), and filed. Every artifact family is 9/9 (verified by
+filesystem audit); 2202 files filed. The only remaining item is Appendix~N
+(placeholder, awaiting the frozen algorithm set).}}}
 
 \section*{Category legend}
 \begin{itemize}[leftmargin=1.5em,itemsep=1pt]
@@ -48,18 +47,17 @@ awaiting the frozen algorithm set).}}}
   and smoothed (window=800) versions; choose later.
 \end{itemize}
 
-\noindent\textbf{Active paper set (7):} activemq, cassandra, groovy, kafka, spark,
-zeppelin, zookeeper. \textbf{Dropped for now (2):} \code{hadoop-hdfs},
-\code{hadoop-mapreduce} --- the two multi-repository projects (extreme imbalance,
-build-trouble history). \textbf{They are fully C3-recoverable on demand}: their Neo4j
-dumps (hdfs $1.0$\,GB, mapreduce $655$\,MB) and result pickles are retained, so
-restoring + re-running experiments regenerates their entire artifact set (per-graph
-fusion, raw scores, ROC, streams, probe, sweeps). The active set is defined once in
-\code{inference/paper\_projects.py} (\code{ACTIVE} vs \code{DROPPED}); moving the two
-back into \code{ACTIVE} and re-running the generators re-includes them.
-\emph{Planned: after the current plan (cassandra + C2 + groovy C3), do the full C2+C3
-runs for mapreduce and hdfs too.} Remaining uncovered: camel, flink, hbase, hive,
-ignite.
+\noindent\textbf{Active paper set (9, as of \today):} activemq, cassandra, groovy,
+kafka, spark, zeppelin, zookeeper, \code{hadoop-hdfs}, \code{hadoop-mapreduce}. The two
+multi-repository projects (hdfs, mapreduce) were previously dropped but are now
+\textbf{fully re-included}: their dumps were restored (hdfs $1.0$\,GB / 2907 commits,
+mapreduce $655$\,MB / 1321 commits), \code{run\_final\_experiments.py} re-run to persist
+their \code{raw\_method\_scores}, and the whole cache-only generator suite re-run in both
+settings. Every artifact family below is now \textbf{9/9}. The set is defined once in
+\code{inference/paper\_projects.py} (\code{ACTIVE}); \code{DROPPED} is now empty.
+\emph{Caveat (honest): both are heavily class-imbalanced, so their per-project metrics
+read weaker (very high BuggyF1, low/degenerate G-Mean on some graphs) --- expected, not
+an error.} Remaining uncovered projects: camel, flink, hbase, hive, ignite (\Cfour).
 
 \section*{Protocol parameters (naming, fixed defaults, and the two variants)}
 The deployed evaluation fixes three protocol parameters; \emph{two} of these are now
@@ -293,12 +291,13 @@ resident graph to re-query).}
   from the resident zookeeper graph.
   \item \TODO\ \Cone\ \textbf{Appendix~N} final content (fill once the main-text
   algorithm set is frozen) --- \emph{the only remaining active-set item}.
-  \item \emph{Deferred (out of active set):} full C2$+$C3 for \code{hadoop-hdfs} and
-  \code{hadoop-mapreduce} (dumps retained, one-line re-add to \code{ACTIVE}). New
-  candidate: \code{hbase} --- its Phase-A base is dumped (\code{outputs/hbase/neo4j\_dump/hbase.dump},
-  1\,GB) but the online layers were stopped mid-AST; it needs a \Cfour\ resume
-  (restore + \code{--from b5}) to become an 8th active project. Other uncovered:
-  camel/flink/hive/ignite (\Cfour\ build).
+  \item \DONE\ (\today) \textbf{hadoop-hdfs + hadoop-mapreduce fully re-included} ---
+  restored, re-run, filed 9/9 across every family (both settings). Their durable caches
+  (\code{raw\_method\_scores}, \code{raw\_fusion\_scores}, \code{final\_*\_results.pkl},
+  ablation/probe pkls) are persisted, so they are re-generable as \Ctwo\ henceforth.
+  \item \emph{Deferred (needs \Cfour\ build):} \code{hbase} --- Phase-A base dumped
+  (1\,GB) but online layers stopped mid-AST; resume via restore + \code{--from b5}.
+  Other uncovered: camel/flink/hive/ignite.
 \end{enumerate}
 
 \noindent\emph{Live tracker --- flip \PARTIAL/\TODO\ to \DONE\ as each item is filed
