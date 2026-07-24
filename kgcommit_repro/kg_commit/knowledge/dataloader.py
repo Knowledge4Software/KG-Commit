@@ -107,6 +107,14 @@ class CommitDataLoader:
 
         # Keep your command array exactly the same
         cmd = ["git", "-C", repo.working_dir, "log", "--reverse", f"--format={log_format}", "--numstat", "--summary", "-p"]
+        # Windows fix: some repos (e.g. hbase) contain files with a ':' in their
+        # name (HBASE-18070-ROOT_hbase:meta_Region_Replicas.pdf). ':' is illegal
+        # in Windows paths, so `git log -p` cannot materialize that blob's
+        # temp-file and dies with "fatal: unable to create temp-file: Invalid
+        # argument", aborting the whole stream. These are binary files that carry
+        # no signal for the KG (only .java text is parsed), so exclude any
+        # colon-named path from the diff. Trailing pathspec must come last.
+        colon_exclude = ["--", ".", ":(exclude,glob)**/*:*"]
         stdin_bytes = None
         if only_commits:
             # Restrict to an explicit SHA set: --no-walk stops history traversal
@@ -121,6 +129,7 @@ class CommitDataLoader:
             stdin_bytes = ("\n".join(allow) + "\n").encode("utf-8")
         if limit > 0:
             cmd.extend(["-n", str(limit)])
+        cmd += colon_exclude   # trailing pathspec MUST be last (excludes ':'-named files)
 
         # NATIVE BYTES FIX: Directly stream stdout into bytes, completely bypassing encoding layers
         process = subprocess.run(cmd, input=stdin_bytes,
