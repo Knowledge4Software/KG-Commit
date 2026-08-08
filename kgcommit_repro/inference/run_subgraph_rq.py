@@ -69,6 +69,7 @@ VARIANTS = [
     ("V2b_dfg", "DFG (def-use) delta",    "DFGNode", "atype"),
     ("V2c_pdg", "PDG/CPG delta",          "PDGNode", "atype"),
     ("V2d_seq", "token/stmt-seq delta",   "SEQNode", "atype"),
+    ("V2e_ast_method", "AST (per-method) delta", "ASTMethodNode", "atype"),
     ("V3_ast",  "AST delta (incumbent)",  "ASTNode", "ast_type"),
 ]
 
@@ -207,7 +208,8 @@ def main():
 
     ok = [v for v in VARIANTS if "error" not in results[v[0]]]
     short = {"V1_none": "Core", "V2a_cfg": "CFG", "V2b_dfg": "DFG",
-             "V2c_pdg": "PDG", "V2d_seq": "Seq", "V3_ast": "AST"}
+             "V2c_pdg": "PDG", "V2d_seq": "Seq",
+             "V2e_ast_method": "AST-m", "V3_ast": "AST"}
     # per-method x variant tables, one per metric
     for mk, mlabel in [("PR_AUC", "PR-AUC"), ("ROC_AUC", "ROC-AUC"),
                        ("F1_online", "F1-online")]:

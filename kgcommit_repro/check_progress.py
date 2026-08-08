@@ -32,7 +32,7 @@ from config.project_config import (PROJECT, OUT, SCAL_OUT, TIMING_DIR, CKPT_PATH
                                     ckpt_path, CSV_PATH, NEO4J_URI, NEO4J_AUTH)
 
 LAYERS = [("ast", "ASTNode"), ("cfg", "CFGNode"), ("dfg", "DFGNode"),
-          ("pdg", "PDGNode"), ("seq", "SEQNode")]
+          ("pdg", "PDGNode"), ("seq", "SEQNode"), ("ast_method", "ASTMethodNode")]
 
 
 def n_target():

@@ -46,7 +46,7 @@ from config.project_config import (PROJECT, base_commit, TIMING_DIR, summary,
 PKG = Path(__file__).resolve().parent.parent
 BUILD = PKG / "build"
 INFER = PKG / "inference"
-SUBKINDS = ["cfg", "dfg", "pdg", "seq"]
+SUBKINDS = ["cfg", "dfg", "pdg", "seq"]   # ast_method dropped (not used in the paper)
 
 
 def _run(script: Path, *args, label=""):

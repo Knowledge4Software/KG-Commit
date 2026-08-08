@@ -46,13 +46,16 @@ def _lr():
     return LogisticRegression(max_iter=1500, class_weight="balanced", solver="lbfgs")
 
 
-def channel_score(X, y, W, N, sparse=False):
-    """Prequential LR score of one feature block (valid over [W,N])."""
+def channel_score(X, y, W, N, sparse=False, gap=0):
+    """Prequential LR score of one feature block (valid over [W,N]).
+    `gap` (verification-latency G): refit uses labels only up to index u-gap; the
+    most recent `gap` commits' labels are withheld from training."""
     pred = np.full(N, np.nan); i = W; blk = 0; clf = None
     solver = "liblinear" if sparse else "lbfgs"
     def fit(u):
+        u2 = max(0, u - gap)
         c = LogisticRegression(max_iter=1500, class_weight="balanced", solver=solver)
-        return c.fit(X[:u], y[:u]) if len(set(y[:u])) > 1 else None
+        return c.fit(X[:u2], y[:u2]) if u2 >= 2 and len(set(y[:u2])) > 1 else None
     while i < N:
         j = min(N, i + BLOCK); idx = np.arange(i, j)
         if blk % 2 == 0:
@@ -62,24 +65,29 @@ def channel_score(X, y, W, N, sparse=False):
     return pred
 
 
-def eval_subset(scores, subset, y, W, N, init=INIT, refit=3):
+def eval_subset(scores, subset, y, W, N, init=INIT, refit=3, gap=0):
     """Metrics + rolling trajectory + preds for a fused subset over [W+init, N].
-    Size-1 subsets use the raw method score; size>1 use prequential LR stacking."""
+    Size-1 subsets use the raw method score; size>1 use prequential LR stacking.
+    `gap` (verification-latency G): the fusion head refits on labels only up to
+    index j-gap, and the operating-point threshold is tuned with the same gap; the
+    most recent `gap` commits' labels are withheld. gap=0 = current behaviour."""
     ev0 = W + init; ev = np.arange(ev0, N)
     if len(subset) == 1:
         p_all = scores[subset[0]]
     else:
         Z = np.column_stack([np.nan_to_num(scores[m], nan=y[:W].mean()) for m in subset])
         p_all = np.full(N, np.nan); i = ev0; blk = 0
-        clf = _lr().fit(Z[W:ev0], y[W:ev0]) if len(set(y[W:ev0])) > 1 else None
+        u0 = max(W, ev0 - gap)
+        clf = _lr().fit(Z[W:u0], y[W:u0]) if u0 - W >= 2 and len(set(y[W:u0])) > 1 else None
         while i < N:
             j = min(N, i + BLOCK); idx = np.arange(i, j)
             p_all[idx] = clf.predict_proba(Z[idx])[:, 1] if clf else y[:i].mean()
-            if blk % refit == 0 and len(set(y[W:j])) > 1:
-                clf = _lr().fit(Z[W:j], y[W:j])
+            uj = max(W, j - gap)
+            if blk % refit == 0 and uj - W >= 2 and len(set(y[W:uj])) > 1:
+                clf = _lr().fit(Z[W:uj], y[W:uj])
             i = j; blk += 1
     p = np.clip(np.nan_to_num(p_all[ev], nan=y[ev].mean()), 0, 1)
-    return final_metrics(y[ev], p), rfe.metric_traj(y[ev], p, ev0), p
+    return final_metrics(y[ev], p, gap=gap), rfe.metric_traj(y[ev], p, ev0, gap=gap), p, ev0
 
 
 def main():
@@ -104,7 +112,7 @@ def main():
     for r in range(1, 6):
         for combo in itertools.combinations(METHODS, r):
             key = "+".join(combo)
-            m, tr, _ = eval_subset(scores, list(combo), y, W, N)
+            m, tr, _, _ = eval_subset(scores, list(combo), y, W, N)
             part1[key] = dict(methods=list(combo), n=r, metrics=m, traj=tr)
     # choose F by Macro-F1 (the project's primary metric): the smallest combo
     # whose Macro-F1 is within TOL of the best Macro-F1 (parsimony tie-break).
@@ -119,19 +127,45 @@ def main():
     print("Part 2: F (+G/+M/+G+M) ...")
     F = chosen["methods"]
     part2 = {}
+    raw_fusion = {}   # name -> raw per-commit fused score over [ev0, N] (+ eval start)
+    ev0_ref = None
     for name, extra in [("F", []), ("F+G", ["G"]), ("F+M", ["M"]), ("F+G+M", ["G", "M"])]:
-        m, tr, _ = eval_subset(scores, F + extra, y, W, N)
-        part2[name] = dict(methods=F + extra, metrics=m, traj=tr)
+        m, tr, p_ev, ev0 = eval_subset(scores, F + extra, y, W, N)
+        tr_smooth = rfe.metric_traj(y[np.arange(ev0, N)], p_ev, ev0,
+                                    roll=rfe.TRAJ_WINDOW_SMOOTH)
+        part2[name] = dict(methods=F + extra, metrics=m, traj=tr, traj_smooth=tr_smooth)
+        raw_fusion[name] = p_ev.astype(np.float32); ev0_ref = ev0
 
     pickle.dump(dict(part1=part1, chosen=chosen_key, part2=part2, F=F,
                      meta=dict(W=W, N=N, init=INIT)), open(OUT / "final_fusion_results.pkl", "wb"))
+    _persist_raw_fusion(raw_fusion, y, ev0_ref, N)
     make_figures(part1, chosen_key, part2, scores, y, W, N)
     print(f"saved -> {OUT/'final_fusion_results.pkl'} + figures")
 
 
+def _persist_raw_fusion(raw_fusion, y, ev0, N):
+    """Dump the raw per-commit fused scores (F / F+G / F+M / F+G+M) over the
+    evaluation span [ev0, N) to .pkl + .csv, so any future re-smoothing / operating-
+    point change needs no Neo4j rebuild."""
+    import csv
+    ev = np.arange(ev0, N)
+    pickle.dump(dict(names=list(raw_fusion.keys()), ev0=ev0, N=N,
+                     commit_index=ev, y=np.asarray(y[ev], dtype=np.int8),
+                     scores=raw_fusion),
+                open(OUT / "raw_fusion_scores.pkl", "wb"))
+    with open(OUT / "raw_fusion_scores.csv", "w", newline="") as fh:
+        w = csv.writer(fh); w.writerow(["commit_index", "y"] + list(raw_fusion.keys()))
+        for k, i in enumerate(ev):
+            w.writerow([int(i), int(y[i])] +
+                       [f"{float(raw_fusion[n][k]):.6f}" for n in raw_fusion])
+    print(f"saved raw fusion scores -> {OUT/'raw_fusion_scores.pkl'} "
+          f"(+ raw_fusion_scores.csv; eval span [{ev0},{N}))")
+
+
 # ── stream figures ───────────────────────────────────────────────────────────
 
-def _grid(panels_series, suptitle, fname, legend_title):
+def _grid(panels_series, suptitle, fname, legend_title, outdir=None):
+    outdir = outdir or FIG; outdir.mkdir(parents=True, exist_ok=True)
     fig, axes = plt.subplots(2, 4, figsize=(16, 7)); axes = axes.ravel()
     for ax, (mk, lbl) in zip(axes, M7):
         for lab, (xs, ys, color, lw, ls) in panels_series[mk].items():
@@ -144,13 +178,13 @@ def _grid(panels_series, suptitle, fname, legend_title):
                                           title=legend_title, frameon=False)
     fig.suptitle(suptitle, fontsize=13, weight="bold", y=1.01); fig.tight_layout()
     for e in ("png", "pdf"):
-        fig.savefig(FIG / f"{fname}.{e}", bbox_inches="tight")
-    plt.close(fig); print(f"  wrote {fname}")
+        fig.savefig(outdir / f"{fname}.{e}", bbox_inches="tight")
+    plt.close(fig); print(f"  wrote {fname} -> {outdir}")
 
 
 def make_figures(part1, chosen_key, part2, scores, y, W, N):
     MCOL = {"RN": "#56B4E9", "PPR": "#E69F00", "LP": "#009E73", "DW": "#0072B2", "KGE": "#CC79A7"}
-    # Part 1: chosen fusion (bold) + 5 singles
+    # Part 1: chosen fusion (bold) + 5 singles  (accurate window only)
     p1 = {mk: {} for mk, _ in M7}
     ct = part1[chosen_key]["traj"]
     for mk, _ in M7:
@@ -160,15 +194,18 @@ def make_figures(part1, chosen_key, part2, scores, y, W, N):
             p1[mk][m] = (t["idx"], t[mk], MCOL[m], 1.4, "--" if m not in chosen_key.split("+") else "-")
     _grid(p1, f"Part 1 — chosen fusion F ({chosen_key}) vs the five single methods",
           "fig_final_fusion_part1", "trend")
-    # Part 2: F, F+G, F+M, F+G+M
+    # Part 2: F, F+G, F+M, F+G+M  -- rendered in BOTH windows (accurate 150 + smoothed 800)
     C2 = {"F": "#0072B2", "F+G": "#009E73", "F+M": "#E69F00", "F+G+M": "#D55E00"}
-    p2 = {mk: {} for mk, _ in M7}
-    for mk, _ in M7:
-        for name in ["F", "F+G", "F+M", "F+G+M"]:
-            t = part2[name]["traj"]
-            p2[mk][name] = (t["idx"], t[mk], C2[name], 2.6 if name == "F+G+M" else 1.8, "-")
-    _grid(p2, "Part 2 — adding CSTG (G) and JIT metrics (M) to the chosen fusion F",
-          "fig_final_fusion_part2", "fusion")
+    for version, tkey, window in [("accurate", "traj", 150), ("smoothed", "traj_smooth", 800)]:
+        p2 = {mk: {} for mk, _ in M7}
+        for mk, _ in M7:
+            for name in ["F", "F+G", "F+M", "F+G+M"]:
+                t = part2[name].get(tkey) or part2[name]["traj"]
+                p2[mk][name] = (t["idx"], t[mk], C2[name], 2.6 if name == "F+G+M" else 1.8, "-")
+        outdir = FIG if version == "accurate" else FIG / "smoothed"
+        _grid(p2, f"Part 2 — adding CSTG (G) and JIT metrics (M) to F  "
+                  f"[window={window}, {version}]",
+              "fig_final_fusion_part2", "fusion", outdir=outdir)
 
 
 if __name__ == "__main__":

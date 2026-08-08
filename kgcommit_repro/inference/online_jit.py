@@ -77,22 +77,30 @@ def _best_threshold(y, p):
     f1 = 2 * prec * rec / (prec + rec + 1e-12)
     return float(p[order][int(np.argmax(f1))])
 
-def online_decisions(p, y, init=300, step=150):
+def online_decisions(p, y, init=300, step=150, gap=0):
     """Prequential hard labels: threshold tuned ONLINE on the past only (re-tuned
     every `step` commits to maximise buggy-F1 on already-seen predictions). This
     is the leakage-free deployment operating point at which all threshold-based
-    metrics (precision/recall/F1/G-mean/accuracy) are reported."""
+    metrics (precision/recall/F1/G-mean/accuracy) are reported.
+
+    `gap` (verification-latency gap G): a commit's label is only usable for tuning
+    once G later commits have arrived (its fix would surface by then). So when
+    re-tuning the threshold at commit i, only labels up to index i-gap are revealed;
+    the most recent `gap` commits' labels are withheld. gap=0 is the default
+    (immediate labels)."""
     p = np.asarray(p); y = np.asarray(y); yhat = np.zeros(len(y), int); thr = 0.5
     for i in range(len(y)):
         yhat[i] = int(p[i] >= thr)
         if i + 1 >= init and (i + 1) % step == 0:
-            thr = _best_threshold(y[:i+1], p[:i+1])
+            hi = (i + 1) - gap                       # reveal labels only up to i-gap
+            if hi >= 2 and len(np.unique(y[:hi])) > 1:
+                thr = _best_threshold(y[:hi], p[:hi])
     return yhat
 
-def online_f1(p, y, init=300, step=150):
+def online_f1(p, y, init=300, step=150, gap=0):
     """Prequential buggy-F1 at the online-tuned operating point."""
     y = np.asarray(y)
-    return float(f1_score(y, online_decisions(p, y, init, step), zero_division=0))
+    return float(f1_score(y, online_decisions(p, y, init, step, gap), zero_division=0))
 
 def cum_metrics(y, p):
     p = np.clip(np.asarray(p, float), 0.0, 1.0)   # guard float drift (e.g. 1.0000002)
@@ -104,14 +112,15 @@ def cum_metrics(y, p):
                Brier=brier_score_loss(y, p), Acc=float((yh == y).mean()))
     return out
 
-def final_metrics(y, p):
+def final_metrics(y, p, gap=0):
     """Full evaluation-metric suite for end-of-stream scoring. Threshold-free
     ranking metrics (AUC/ROC, PR-AUC) plus the project's headline operating-point
     metrics --- Precision, Recall, Buggy-F1, Macro-F1, G-Mean, Accuracy --- all
-    computed at the leakage-free ONLINE-tuned threshold (online_decisions)."""
+    computed at the leakage-free ONLINE-tuned threshold (online_decisions).
+    `gap` (verification-latency G) lags the labels used to tune that threshold."""
     y = np.asarray(y); p = np.clip(np.asarray(p, float), 0.0, 1.0)
     cm = cum_metrics(y, p)                       # ROC_AUC, PR_AUC, F1@.5, MCC, Brier, Acc@.5
-    yhat = online_decisions(p, y)
+    yhat = online_decisions(p, y, gap=gap)
     prec = precision_score(y, yhat, pos_label=1, zero_division=0)
     rec  = recall_score(y, yhat, pos_label=1, zero_division=0)      # buggy recall / sensitivity
     spec = recall_score(y, yhat, pos_label=0, zero_division=0)      # benign recall / specificity

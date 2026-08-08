@@ -37,6 +37,8 @@ REGISTRY = {
     "dfg": SubgraphSpec("dfg", "DFGNode", "HAS_DFG", "kind", "group", "F"),
     "pdg": SubgraphSpec("pdg", "PDGNode", "HAS_PDG", "kind", "group", "P"),
     "seq": SubgraphSpec("seq", "SEQNode", "HAS_SEQ", "type", "group", "S"),
+    "ast_method": SubgraphSpec("ast_method", "ASTMethodNode", "HAS_AST_METHOD",
+                               "kind", "group", "AM"),
 }
 
 DELTA_RELS = ("ADDS", "REMOVES", "UPDATES", "MOVES")

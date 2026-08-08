@@ -52,6 +52,7 @@ from sklearn.preprocessing import StandardScaler
 from online_jit import final_metrics, BLOCK
 from online_infer import WARMUP_FRAC
 import effort_metrics as em
+from timing_probe import Probe
 # reuse the SAME 7-metric online-trajectory helper + resolution the KG trends use,
 # so the baseline stream trend is drawn identically (same stride/window/decisions).
 from run_subgraph_rq import metric_trajectory, TRAJ_STRIDE, TRAJ_WINDOW
@@ -77,9 +78,14 @@ def load_project():
     return X, y, effort
 
 
-def prequential_scores(X, y, model_factory, refit_every=3):
+def prequential_scores(X, y, model_factory, refit_every=3, probe=None):
     """Predict-then-learn in blocks, refit on the expanding past window. Returns a
-    per-commit probability array (nan before warm-up)."""
+    per-commit probability array (nan before warm-up).
+
+    `probe` (timing_probe.Probe): when given, the deployment-cost components are
+    timed separately -- featurisation (here: the scaler transform, i.e. the whole
+    feature preparation these baselines do at inference), the model's predict call,
+    and the refits (amortised later over the scored commits)."""
     N = len(y); W = int(N * WARMUP_FRAC)
     preds = np.full(N, np.nan)
     scaler = StandardScaler().fit(X[:W])
@@ -87,10 +93,21 @@ def prequential_scores(X, y, model_factory, refit_every=3):
     i = W; blk = 0
     while i < N:
         j = min(N, i + BLOCK); idx = np.arange(i, j)
-        preds[idx] = clf.predict_proba(scaler.transform(X[idx]))[:, 1]
+        if probe is not None:
+            with probe.featurize(n=len(idx)):
+                Xb = scaler.transform(X[idx])
+            with probe.predict(n=len(idx)):
+                preds[idx] = clf.predict_proba(Xb)[:, 1]
+        else:
+            preds[idx] = clf.predict_proba(scaler.transform(X[idx]))[:, 1]
         if blk % refit_every == 0:
-            scaler = StandardScaler().fit(X[:j])
-            clf = model_factory().fit(scaler.transform(X[:j]), y[:j])
+            if probe is not None:
+                with probe.refit():
+                    scaler = StandardScaler().fit(X[:j])
+                    clf = model_factory().fit(scaler.transform(X[:j]), y[:j])
+            else:
+                scaler = StandardScaler().fit(X[:j])
+                clf = model_factory().fit(scaler.transform(X[:j]), y[:j])
         i = j; blk += 1
     return preds, W
 
@@ -113,10 +130,10 @@ def naive_scores(y, kind):
     return p, W
 
 
-def evaluate(y, p, effort, W):
+def evaluate(y, p, effort, W, gap=0):
     ev = np.arange(W, len(y))
     yt = y[ev]; pt = np.nan_to_num(p[ev], nan=float(yt.mean()))
-    leaf = final_metrics(yt, pt)
+    leaf = final_metrics(yt, pt, gap=gap)
     leaf = {k: (float(v) if isinstance(v, (int, float, np.floating)) else v)
             for k, v in leaf.items()}
     # effort-aware (uses per-commit inspection effort = la+ld)
@@ -139,9 +156,12 @@ def main():
                                                 n_jobs=-1, random_state=0),
         "B_HGB": lambda: HistGradientBoostingClassifier(random_state=0),
     }
+    timings = {}
     for name, fac in learned.items():
-        p, w = prequential_scores(X, y, fac)
+        pr = Probe()
+        p, w = prequential_scores(X, y, fac, probe=pr)
         results[name] = evaluate(y, p, effort, w)
+        timings[name] = pr.finalize(n_scored=int(len(y) - w))
         preds_by[name] = p
     for name, kind in [("B_ALL1", "all1"), ("B_ALL0", "all0"), ("B_RATE", "rate")]:
         p, w = naive_scores(y, kind)
@@ -155,6 +175,7 @@ def main():
     ev = np.arange(W, N); yt = y[ev]
     p_best = np.nan_to_num(preds_by[best][ev], nan=float(yt.mean()))
     base_traj = metric_trajectory(yt, p_best, W)
+    base_traj_smooth = metric_trajectory(yt, p_best, W, roll=800)
     base_raw = {"idx": (W + np.arange(len(ev))).tolist(),
                 "y": yt.astype(int).tolist(), "pred": p_best.astype(float).tolist(),
                 "traj_stride": TRAJ_STRIDE, "traj_window": TRAJ_WINDOW}
@@ -162,7 +183,9 @@ def main():
     out = dict(project=PROJECT, N=N, warmup=W, n_eval=N - W,
                bug_rate=float(y.mean()), metric_keys=METRIC_KEYS,
                baselines=results, jit_cols=JIT_COLS,
-               best_baseline=best, baseline_traj=base_traj, baseline_raw=base_raw)
+               best_baseline=best, baseline_traj=base_traj,
+               baseline_traj_smooth=base_traj_smooth, baseline_raw=base_raw,
+               timings=timings)
     OUT.mkdir(parents=True, exist_ok=True)
     pickle.dump(out, open(OUT / "baseline_results.pkl", "wb"))
 

@@ -43,7 +43,7 @@ def sweep_block(S, values=(25, 50, 100, 200)):
     return {str(v): _leaf(S, block=v) for v in values}
 
 
-def sweep_warmup(S, values=(0.20, 0.30, 0.40, 0.50)):
+def sweep_warmup(S, values=(0.05, 0.10, 0.20, 0.30, 0.40, 0.50)):
     """Re-derive the warm-up split from the stream and re-run. We rebuild a
     shallow copy of S with W overridden so run_subset scores from that point."""
     out = {}

@@ -127,7 +127,7 @@ def fig_metric_streams(res):
             ax.plot(t["idx"], t[mk], color=COLOR[v], lw=lw, ls=ls, label=SHORT[v], zorder=z)
         ax.set_title(title, fontsize=12, weight="bold")
         ax.grid(color="#ECECEC"); ax.set_axisbelow(True)
-        ax.set_xlabel("commit index", fontsize=9)
+        ax.set_xlabel("Commit index", fontsize=9)
         ax.tick_params(labelsize=8)
     ax_leg = axes[-1]; ax_leg.axis("off")
     h, l = axes[0].get_legend_handles_labels()

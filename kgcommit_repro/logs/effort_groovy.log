@@ -1,0 +1,12 @@
+[groovy] effort-aware eval over 5642 commits (bug rate 0.241)
+
+model             Popt   ACC@20 Buggy_F1  PR_AUC
+------------------------------------------------
+Fusion(F+G)      0.873    0.674    0.606   0.628
+M_metrics        0.841    0.615    0.453   0.429
+T_tfidf          0.845    0.616    0.513   0.495
+R_priors         0.857    0.643    0.523   0.524
+P_ppr            0.830    0.588    0.493   0.366
+G_cstg           0.863    0.644    0.580   0.588
+
+saved -> C:\Users\sinab\Documents\GitHub\KG-Commit\outputs\groovy\effort_results.pkl

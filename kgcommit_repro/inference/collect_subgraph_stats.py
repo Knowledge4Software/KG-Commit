@@ -22,6 +22,7 @@ from config.project_config import NEO4J_URI, NEO4J_AUTH
 
 LAYERS = [   # (variant id, pretty, label, type property)
     ("ast", "AST",        "ASTNode", "ast_type"),
+    ("ast_method", "AST (method)", "ASTMethodNode", "atype"),
     ("cfg", "CFG",        "CFGNode", "atype"),
     ("dfg", "DFG",        "DFGNode", "atype"),
     ("pdg", "PDG/CPG",    "PDGNode", "atype"),

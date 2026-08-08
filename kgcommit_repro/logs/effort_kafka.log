@@ -1,0 +1,12 @@
+[kafka] effort-aware eval over 1669 commits (bug rate 0.400)
+
+model             Popt   ACC@20 Buggy_F1  PR_AUC
+------------------------------------------------
+Fusion(F+G)      0.893    0.617    0.761   0.828
+M_metrics        0.872    0.594    0.697   0.765
+T_tfidf          0.864    0.579    0.679   0.721
+R_priors         0.874    0.596    0.679   0.710
+P_ppr            0.863    0.585    0.605   0.523
+G_cstg           0.882    0.603    0.737   0.791
+
+saved -> C:\Users\sinab\Documents\GitHub\KG-Commit\outputs\kafka\effort_results.pkl

@@ -111,7 +111,76 @@ def _seq_method(node):
     return G, root[0], (lambda nid, d: d.get("kind", "?"))
 
 
-_METHOD = {"cfg": _cfg_method, "pdg": _pdg_method, "dfg": _dfg_method, "seq": _seq_method}
+# ── per-method AST builder (scope-matched to CFG/DFG/PDG) ───────────────
+# Uses the SAME method-discovery gate and SAME json shape. The ONLY
+# difference vs CFG/DFG/PDG is the representation: a full syntax tree
+# instead of a control/data/dependence graph. This is the point of the
+# comparison — same scope, different representation.
+
+# AST node grouping (imported from the existing build_ast_features module
+# to reuse the proven classification; lazy-loaded to avoid import-time cost
+# when this module is used as a worker for other kinds).
+_ast_group_fn = None
+
+def _get_ast_group(name):
+    global _ast_group_fn
+    if _ast_group_fn is None:
+        import build_ast_features as bf
+        _ast_group_fn = bf.ast_group
+    return _ast_group_fn(name)
+
+
+def _ast_method_method(node):
+    """Per-method AST: full syntax tree of the method body, using javalang
+    node-type names as ``kind`` (matching CFG/DFG/PDG's property name).
+    Scope-matched to the other builders: only method-body constructs.
+    Edges use AST_CHILD (the natural tree parent→child relationship)."""
+    G = nx.DiGraph(); ctr = [0]
+    root_nid = None
+    stack = [(node, None, 0)]
+    while stack:
+        jval, parent_nid, child_pos = stack.pop()
+        nid = f"N{ctr[0]}"; ctr[0] += 1
+        if parent_nid is None:
+            root_nid = nid
+        if isinstance(jval, jlt.Node):
+            t = type(jval).__name__
+            vs = ''
+            if getattr(jval, 'name', None):                 vs = str(jval.name)[:24]
+            elif getattr(jval, 'value', None) is not None:  vs = str(jval.value)[:24]
+            elif getattr(jval, 'operator', None):           vs = str(jval.operator)[:24]
+            p = getattr(jval, 'position', None)
+            G.add_node(nid, kind=t, group=_get_ast_group(t),
+                       line=(p.line if p else -1), var=vs)
+            if parent_nid is not None:
+                G.add_edge(parent_nid, nid, rel='AST_CHILD')
+            children = []; cp = 0
+            for child in jval.children:
+                if child is None:
+                    continue
+                if isinstance(child, jlt.Node):
+                    children.append((child, nid, cp)); cp += 1
+                elif isinstance(child, (list, frozenset, set)):
+                    for it in child:
+                        if isinstance(it, jlt.Node):
+                            children.append((it, nid, cp)); cp += 1
+                        elif isinstance(it, str) and it.strip():
+                            children.append((it, nid, cp)); cp += 1
+                elif isinstance(child, str) and child.strip():
+                    children.append((child, nid, cp)); cp += 1
+            stack.extend(reversed(children))
+        else:
+            val = jval[:24] if isinstance(jval, str) else str(jval)[:24]
+            G.add_node(nid, kind='Identifier', group='leaf',
+                       line=-1, var=val)
+            if parent_nid is not None:
+                G.add_edge(parent_nid, nid, rel='AST_CHILD')
+    return G, root_nid, (lambda nid, d: d.get("kind", "?"))
+
+
+_METHOD = {"cfg": _cfg_method, "pdg": _pdg_method, "dfg": _dfg_method,
+           "seq": _seq_method, "ast_method": _ast_method_method}
+
 
 
 def build_file_graph(kind, src_text, rel):

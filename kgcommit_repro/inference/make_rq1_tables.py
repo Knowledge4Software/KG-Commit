@@ -20,7 +20,10 @@ import csv
 from pathlib import Path
 import numpy as np
 
-import _kgc_paths  # noqa: F401
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import _kgc_paths  # noqa: E402,F401
 import run_final_fusion as rff
 import run_final_experiments as rfe
 from online_jit import final_metrics
@@ -117,7 +120,7 @@ def mk_ok(d, metrics):
     return all(m in d and d[m] == d[m] for m in metrics)
 
 
-def render_table(rows_by_proj, metrics, caption, label, suffix):
+def render_table(rows_by_proj, metrics, caption, label, suffix, with_cost=False):
     keys = [k for k, _ in BASE5]
     ncol = (1 + len(BASE5)) * len(metrics)
     lines = [r"\begin{table*}[t]\centering", r"\scriptsize\setlength{\tabcolsep}{3pt}",
@@ -148,16 +151,81 @@ def render_table(rows_by_proj, metrics, caption, label, suffix):
     weights = [ (pickle.load(open(OUTP/f/"baseline_extra_results.pkl","rb"))["n_eval"]
                  if (OUTP/f/"baseline_extra_results.pkl").exists() else 0)
                 for _, f in PROJECTS]
+    # Aggregate rows. Only these are bolded, and within a row only the BEST model per
+    # metric is bolded, so the eye lands on who wins rather than on every average.
     for avglab, w in [("Macro-Avg", None), ("Micro-Avg", weights)]:
         agg = _avg(disp_rows, keys, metrics, w)
+        order = ["FG"] + keys
+        best = {}
+        for m in metrics:
+            vals = [(mk, agg.get(mk, {}).get(m)) for mk in order]
+            vals = [(k, v) for k, v in vals if v is not None]
+            if vals:
+                best[m] = max(vals, key=lambda kv: kv[1])[0]
         cells = [r"\textbf{%s}" % avglab]
-        for mk in ["FG"] + keys:
+        for mk in order:
             for m in metrics:
                 v = agg.get(mk, {}).get(m)
-                cells.append(r"\textbf{%.3f}" % v if v is not None else "--")
+                if v is None:
+                    cells.append("--")
+                elif best.get(m) == mk:
+                    cells.append(r"\textbf{%.3f}" % v)
+                else:
+                    cells.append("%.3f" % v)
         lines.append(r"\midrule " + " & ".join(cells) + r" \\")
+
+    # Deployment-cost rows: measured per-commit total (featurise+predict+refit) and the
+    # slowdown relative to KG-Commit. Costly models are coloured so the trade-off between
+    # accuracy and cost is readable directly from the performance table.
+    cost = _deployment_cost() if with_cost else None
+    if cost:
+        kg = cost.get("FG")
+        span = len(metrics)
+        row = [r"\textit{ms/commit}"]
+        rel = [r"\textit{vs.\ KG-Commit}"]
+        for mk in ["FG"] + keys:
+            v = cost.get(mk)
+            if v is None:
+                row.append(r"\multicolumn{%d}{c}{--}" % span)
+                rel.append(r"\multicolumn{%d}{c}{--}" % span)
+                continue
+            slow = v / kg if kg else None
+            hot = slow is not None and slow >= 5.0     # flag the markedly slower models
+            fmt = (r"\textcolor{BrickRed}{%s}" if hot else "%s")
+            row.append(r"\multicolumn{%d}{c}{%s}" % (span, fmt % ("%.3f" % v)))
+            if mk == "FG":
+                rel.append(r"\multicolumn{%d}{c}{\textbf{1.0$\times$}}" % span)
+            else:
+                rel.append(r"\multicolumn{%d}{c}{%s}" % (span, fmt % (r"%.1f$\times$" % slow)))
+        lines.append(r"\midrule " + " & ".join(row) + r" \\")
+        lines.append(" & ".join(rel) + r" \\")
+
     lines += [r"\bottomrule", r"\end{tabular}", r"\end{table*}"]
     return "\n".join(lines)
+
+
+def _deployment_cost():
+    """Mean measured per-commit deployment cost (ms) per model, keyed like the table."""
+    try:
+        from make_rq2_deployment_cost import kg_cost, baseline_timings
+    except Exception:
+        return None
+    acc = {}
+    kgs = []
+    for _, folder in PROJECTS:
+        c = kg_cost(folder)
+        if c:
+            kgs.append(c[0] + c[1])
+        for k, v in baseline_timings(folder).items():
+            acc.setdefault(k, []).append(v["total_ms_per_commit"])
+    if not kgs:
+        return None
+    # keyed by the same B_* codes the table iterates over
+    out = {"FG": sum(kgs) / len(kgs)}
+    for key, _ in BASE5:
+        if acc.get(key):
+            out[key] = sum(acc[key]) / len(acc[key])
+    return out
 
 
 def main():
@@ -178,19 +246,25 @@ def main():
         else:
             print(f"  {disp}: MISSING (needs baseline_extra + fusion)")
 
-    setting = ("Setting A ($G{=}0,K{=}0.40$)" if suffix == "g0"
-               else f"Setting B ($G{{=}}{args.gap},K{{=}}{args.warmup:g}$)")
     cw_note = (r" All models are scored on the \emph{common evaluation window} "
                r"$[W{+}300,N)$, so every metric is over identical commits.")
+    bold_note = (r" In the aggregate rows the best model per metric is in "
+                 r"\textbf{bold}; per-project rows are left unbolded so the averages "
+                 r"stand out.")
+    cost_note = (r" The final two rows give the measured per-commit deployment cost "
+                 r"(featurisation $+$ inference $+$ amortised refit) and the slowdown "
+                 r"relative to KG-Commit; models at least $5\times$ slower are shown in "
+                 r"\textcolor{BrickRed}{red}.")
     t5 = render_table(rows, PERF,
-                      f"RQ1 performance under the online protocol, {setting}: KG-Commit "
-                      r"($F{+}G$) vs.\ the five baselines. Best average in \textbf{bold}."
-                      + cw_note,
-                      f"tab:rq1_perf_{suffix}", suffix)
+                      "RQ1 performance under the online protocol: KG-Commit "
+                      r"($F{+}G$) vs.\ the five baselines."
+                      + bold_note + cw_note + cost_note,
+                      f"tab:rq1_perf_{suffix}", suffix, with_cost=True)
     (out / f"table5_performance_{suffix}.tex").write_text(t5, encoding="utf-8")
     t6 = render_table(rows, EFFORT,
-                      f"RQ1 effort-aware evaluation, {setting}: KG-Commit ($F{{+}}G$) vs.\\ "
-                      r"the five baselines ($P_{\mathrm{opt}}$, ACC@20)." + cw_note,
+                      r"RQ1 effort-aware evaluation: KG-Commit ($F{+}G$) vs.\ "
+                      r"the five baselines ($P_{\mathrm{opt}}$, ACC@20)."
+                      + bold_note + cw_note,
                       f"tab:rq1_effort_{suffix}", suffix)
     (out / f"table6_effort_{suffix}.tex").write_text(t6, encoding="utf-8")
     print(f"wrote table5_performance_{suffix}.tex + table6_effort_{suffix}.tex -> {out}")

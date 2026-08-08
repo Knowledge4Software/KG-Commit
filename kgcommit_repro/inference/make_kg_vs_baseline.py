@@ -57,8 +57,19 @@ STYLE = {
 ORDER = ["Core", "Core+AST", "Core+AST+CSTG (F)", "Core+AST+CSTG (F+G)", "Baseline"]
 
 
-def _load_trajs():
-    """Return {trend: traj-dict} where traj-dict has 'idx' + the 7 metrics."""
+# the two trajectory versions to render everywhere:
+#   accurate = window=150 (traj key 'traj'),  smoothed = window=800 (key 'traj_smooth')
+TRAJ_VERSIONS = [("accurate", "traj", 150), ("smoothed", "traj_smooth", 800)]
+
+
+def _pick(d, tkey):
+    """traj_smooth if present else fall back to traj (older pickles)."""
+    return d.get(tkey) or d.get("traj")
+
+
+def _load_trajs(tkey="traj"):
+    """Return {trend: traj-dict} for the requested trajectory version. traj-dict
+    has 'idx' + the 7 metrics. tkey='traj' (window=150) or 'traj_smooth' (=800)."""
     trends = {}
     fe = OUT / "final_experiments_results.pkl"
     ff = OUT / "final_fusion_results.pkl"
@@ -67,25 +78,29 @@ def _load_trajs():
     if fe.exists():
         e = pickle.load(open(fe, "rb"))
         # Core / Core+AST = the per-graph 5-method Fusion (same family as F/F+G)
-        if "core" in e and isinstance(e["core"].get("Fusion"), dict) and e["core"]["Fusion"].get("traj"):
-            trends["Core"] = e["core"]["Fusion"]["traj"]
-        if "ast" in e and isinstance(e["ast"].get("Fusion"), dict) and e["ast"]["Fusion"].get("traj"):
-            trends["Core+AST"] = e["ast"]["Fusion"]["traj"]
+        if "core" in e and isinstance(e["core"].get("Fusion"), dict) and _pick(e["core"]["Fusion"], tkey):
+            trends["Core"] = _pick(e["core"]["Fusion"], tkey)
+        if "ast" in e and isinstance(e["ast"].get("Fusion"), dict) and _pick(e["ast"]["Fusion"], tkey):
+            trends["Core+AST"] = _pick(e["ast"]["Fusion"], tkey)
     if ff.exists():
         f = pickle.load(open(ff, "rb"))
         p2 = f.get("part2", {})
-        if "F" in p2 and p2["F"].get("traj"):
-            trends["Core+AST+CSTG (F)"] = p2["F"]["traj"]
-        if "F+G" in p2 and p2["F+G"].get("traj"):
-            trends["Core+AST+CSTG (F+G)"] = p2["F+G"]["traj"]
+        if "F" in p2 and _pick(p2["F"], tkey):
+            trends["Core+AST+CSTG (F)"] = _pick(p2["F"], tkey)
+        if "F+G" in p2 and _pick(p2["F+G"], tkey):
+            trends["Core+AST+CSTG (F+G)"] = _pick(p2["F+G"], tkey)
     if bl.exists():
         b = pickle.load(open(bl, "rb"))
-        if b.get("baseline_traj"):
-            trends["Baseline"] = b["baseline_traj"]
+        # smoothed baseline traj if present, else the accurate one
+        bt = (b.get("baseline_traj_smooth") if tkey == "traj_smooth" else None) or b.get("baseline_traj")
+        if bt:
+            trends["Baseline"] = bt
     return trends
 
 
-def fig_streams(trends):
+def fig_streams(trends, version="accurate", window=150, outdir=None):
+    outdir = outdir or FIG
+    outdir.mkdir(parents=True, exist_ok=True)
     n = 0
     for mk in METRICS:
         fig, ax = plt.subplots(figsize=(9, 4.4))
@@ -99,15 +114,14 @@ def fig_streams(trends):
             drawn = True
         if not drawn:
             plt.close(fig); continue
-        ax.set_title(f"{PRETTY[mk]} over the online stream  [{PROJECT}]",
-                     fontsize=12, weight="bold")
-        ax.set_xlabel("commit index (chronological)")
-        ax.set_ylabel(f"rolling {PRETTY[mk]} (window=150, stride=25)")
+        ax.set_title(f"{PROJECT}", fontsize=12, weight="bold")
+        ax.set_xlabel("Commit index")
+        ax.set_ylabel(PRETTY[mk])
         ax.grid(color="#ECECEC"); ax.set_axisbelow(True)
         ax.legend(fontsize=9, frameon=False, ncol=2, loc="best")
         fig.tight_layout()
         for e in ("png", "pdf"):
-            fig.savefig(FIG / f"fig_stream_{mk}.{e}", bbox_inches="tight")
+            fig.savefig(outdir / f"fig_stream_{mk}.{e}", bbox_inches="tight")
         plt.close(fig); n += 1
     return n
 
@@ -164,15 +178,25 @@ def table_compare():
 
 
 def main():
-    trends = _load_trajs()
-    have = [t for t in ORDER if t in trends]
+    # accurate (window=150) trends decide availability; render BOTH versions.
+    trends_acc = _load_trajs("traj")
+    have = [t for t in ORDER if t in trends_acc]
     print(f"[{PROJECT}] KG-vs-baseline trends available: {have}")
     if len(have) < 2:
         print("  not enough trends (need experiments + baselines run first); skipping.")
         return
-    nfig = fig_streams(trends)
+    total = 0
+    for version, tkey, window in TRAJ_VERSIONS:
+        trends = trends_acc if tkey == "traj" else _load_trajs(tkey)
+        sub = FIG / version
+        nfig = fig_streams(trends, version=version, window=window, outdir=sub)
+        total += nfig
+        # keep the accurate version ALSO at the top level for backward-compatible paths
+        if version == "accurate":
+            fig_streams(trends, version=version, window=window, outdir=FIG)
+        print(f"  [{version}, window={window}] wrote {nfig} stream figures -> {sub}")
     table_compare()
-    print(f"  wrote {nfig} stream figures -> {FIG}")
+    print(f"  wrote {total} stream figures across both versions")
     print(f"  wrote table -> {TAB / 'tab_kg_vs_baseline.tex'}")
 
 

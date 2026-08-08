@@ -119,7 +119,7 @@ projects:
   cassandra:                          # 8,159 labelled commits
     project_key: apache/cassandra
     repo_subpath: repos/apache/cassandra
-    base_commit: ""
+    base_commit: "cf56f8f3acbeac0ddff9ee3131ad7abe2a919ba3"   # 313 .java files at base (find_base_commit.py)
     label_csv: data/apachejit/projects/apache_cassandra.csv
     diff_csv:  data/apachejit/projects/apache_cassandra_diff.csv
     output_namespace: cassandra
@@ -127,7 +127,7 @@ projects:
   hbase:                              # 8,730 labelled commits
     project_key: apache/hbase
     repo_subpath: repos/apache/hbase
-    base_commit: ""
+    base_commit: "89af8294f42a9a16b91a09f7808653a71648718f"   # 29 .java at base (find_base_commit.py)
     label_csv: data/apachejit/projects/apache_hbase.csv
     diff_csv:  data/apachejit/projects/apache_hbase_diff.csv
     output_namespace: hbase
