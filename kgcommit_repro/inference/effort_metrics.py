@@ -21,7 +21,7 @@ into any evaluation harness (compare_baselines.py, online_jit.py) without Neo4j.
 """
 import numpy as np
 
-_trapz = getattr(np, "trapezoid", np.trapz)   # numpy>=2 renamed trapz -> trapezoid
+_trapz = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
 
 
 def _order(score, effort, density):

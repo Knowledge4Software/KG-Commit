@@ -103,7 +103,14 @@ def online_f1(p, y, init=300, step=150, gap=0):
     return float(f1_score(y, online_decisions(p, y, init, step, gap), zero_division=0))
 
 def cum_metrics(y, p):
-    p = np.clip(np.asarray(p, float), 0.0, 1.0)   # guard float drift (e.g. 1.0000002)
+    p = np.asarray(p, float)
+    # NaN survives np.clip and makes sklearn's ROC sort non-monotonic
+    # ("x is neither increasing nor decreasing"). Fall back to the observed
+    # base rate, or 0.5 when y itself is empty.
+    if np.isnan(p).any():
+        fill = float(np.mean(y)) if len(y) and not np.isnan(np.mean(y)) else 0.5
+        p = np.nan_to_num(p, nan=fill)
+    p = np.clip(p, 0.0, 1.0)   # guard float drift (e.g. 1.0000002)
     yh = (p >= 0.5).astype(int)
     out = dict(ROC_AUC=float("nan"), PR_AUC=float("nan"))
     if len(np.unique(y)) > 1:
