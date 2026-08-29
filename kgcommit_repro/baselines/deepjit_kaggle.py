@@ -45,9 +45,14 @@ PROJECT  = "zookeeper"                       # <-- change per run
 DATA_DIR = "/kaggle/input/apachejit-diffs"   # <-- your Kaggle dataset mount path
 OUT_DIR  = "/kaggle/working"
 
-WARMUP_FRAC = 0.40      # MUST match kgcommit_repro/inference/online_infer.py
-BLOCK       = 200       # MUST match
-REFIT_EVERY = 3         # retrain every N blocks on the expanding past (KG uses 3)
+# FINAL RUN: these MUST mirror kgcommit_repro/inference/protocol.py. This script
+# runs standalone on Kaggle and cannot import it, so the values are restated here
+# and must be updated together -- otherwise the Deeper baseline is evaluated under
+# a different protocol than every other model, which invalidates the comparison.
+WARMUP_FRAC = 0.05      # protocol.WARMUP_FRAC (K)
+BLOCK       = 200       # protocol.BLOCK (M)
+GAP         = 50        # protocol.GAP (G)
+REFIT_EVERY = 1         # protocol.REFIT_EVERY -- single-M rule: refit every block
 EPOCHS      = 8         # per (re)fit; small CNN converges fast
 BATCH       = 64
 MSG_LEN     = 64        # token budget for the message channel

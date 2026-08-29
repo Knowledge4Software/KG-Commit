@@ -45,12 +45,12 @@ from sklearn.preprocessing import StandardScaler
 
 # reuse the EXACT metric definitions the KG models use, so baselines are
 # directly comparable (same online-tuned operating point, same effort metrics).
-# IMPORTANT: warm-up fraction must match the KG experiments' protocol. The KG
-# graph/fusion experiments use online_infer.WARMUP_FRAC (0.40); online_jit's is
-# 0.30. Import the SAME 0.40 so the baseline is warmed/scored over an identical
-# window and the per-project comparison figures line up on the x-axis.
-from online_jit import final_metrics, BLOCK
-from online_infer import WARMUP_FRAC
+# FINAL RUN: the baselines must be warmed and scored on exactly the same window,
+# with the same refresh cadence, as the KG experiments -- otherwise the comparison
+# is not like-for-like. All of it comes from the single source of truth. (Before
+# this, online_jit and online_infer disagreed: 0.30 vs 0.40 warm-up.)
+from online_jit import final_metrics
+from protocol import WARMUP_FRAC, BLOCK, REFIT_EVERY
 import effort_metrics as em
 from timing_probe import Probe
 # reuse the SAME 7-metric online-trajectory helper + resolution the KG trends use,
@@ -78,7 +78,7 @@ def load_project():
     return X, y, effort
 
 
-def prequential_scores(X, y, model_factory, refit_every=3, probe=None):
+def prequential_scores(X, y, model_factory, refit_every=REFIT_EVERY, probe=None):
     """Predict-then-learn in blocks, refit on the expanding past window. Returns a
     per-commit probability array (nan before warm-up).
 

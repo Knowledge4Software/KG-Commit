@@ -201,11 +201,19 @@ def attach_full_ast(session, file_id, ast, commit_id, as_new_file):
                       a.pos_line=n.line, a.pos_col=n.col, a.alive=true
     """, file=file_id, nodes=ast["nodes"])
     if ast["edges"]:
-        session.run("""
-            UNWIND $edges AS e
-            MATCH (p:ASTNode {id:e.parent}), (c:ASTNode {id:e.child})
-            MERGE (p)-[r:AST_CHILD]->(c) ON CREATE SET r.pos=e.pos
-        """, edges=ast["edges"])
+        # Chunked: a single file can hold ~57k AST nodes (hive), and unwinding
+        # every edge in ONE transaction exceeds dbms.memory.transaction.total.max.
+        # 5k edges/tx keeps the peak bounded regardless of file size.
+        # execute_write gives each chunk its OWN transaction, so memory is
+        # released at every commit. Chunking session.run() alone does not:
+        # those calls share one auto-commit scope and accumulate until close.
+        _E = ast["edges"]
+        _Q = ("UNWIND $edges AS e "
+              "MATCH (p:ASTNode {id:e.parent}), (c:ASTNode {id:e.child}) "
+              "MERGE (p)-[r:AST_CHILD]->(c) ON CREATE SET r.pos=e.pos")
+        for _i in range(0, len(_E), 2000):
+            _b = _E[_i:_i + 2000]
+            session.execute_write(lambda tx, b=_b: tx.run(_Q, edges=b).consume())
     session.run("""
         MATCH (f:File {id:$file}), (r:ASTNode {id:$root}) MERGE (f)-[:HAS_AST]->(r)
     """, file=file_id, root=ast["root"])
@@ -386,7 +394,7 @@ def main():
                           "adds", "removes", "updates", "moves", "matched",
                           "wall_ms"])
 
-    driver = GraphDatabase.driver(NEO4J_URI, auth=NEO4J_AUTH)
+    driver = GraphDatabase.driver(NEO4J_URI, auth=NEO4J_AUTH, max_connection_lifetime=3600, connection_acquisition_timeout=300, max_transaction_retry_time=180)
     with driver.session() as s:
         # ── performance: index the hot per-file liveness lookup ───────────────
         # load_current_ast / delete_file match (a:ASTNode {file:$file}) and filter

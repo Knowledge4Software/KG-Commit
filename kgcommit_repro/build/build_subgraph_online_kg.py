@@ -150,34 +150,45 @@ class BuilderServer:
 
 def attach_full(session, sp, file_id, graph, commit_id, as_new_file):
     L, AR = sp.node_label, sp.attach_rel
-    session.run(f"""
-        MERGE (f:File {{id:$file}})
-        WITH f
+    # Every write here is chunked into its OWN transaction (execute_write).
+    # A bare session.run keeps all statements in one auto-commit scope, so a
+    # large file accumulates until dbms.memory.transaction.total.max is hit --
+    # the failure that stopped B5 twice on hive. See build_online_kg.py.
+    B = 2000
+
+    def _chunked(q, key, items, **fixed):
+        for i in range(0, len(items), B):
+            b = items[i:i + B]
+            session.execute_write(
+                lambda tx, b=b: tx.run(q, **{key: b}, **fixed).consume())
+
+    session.run(f"MERGE (f:File {{id:$file}})", file=file_id)
+    _chunked(f"""
         UNWIND $nodes AS n
         MERGE (a:{L} {{id:n.id}})
         ON CREATE SET a.file=$file, a.atype=n.type, a.group=n.group,
                       a.method=n.method, a.value=n.value,
                       a.pos_line=n.line, a.pos_col=n.col, a.alive=true
-    """, file=file_id, nodes=graph["nodes"])
+    """, "nodes", graph["nodes"], file=file_id)
     if graph["edges"]:
-        session.run(f"""
+        _chunked(f"""
             UNWIND $edges AS e
             MATCH (p:{L} {{id:e.src}}), (c:{L} {{id:e.dst}})
             MERGE (p)-[r:SUB_EDGE {{kind:$kind}}]->(c) ON CREATE SET r.etype=e.etype
-        """, edges=graph["edges"], kind=sp.kind)
+        """, "edges", graph["edges"], kind=sp.kind)
     if graph["roots"]:
-        session.run(f"""
+        _chunked(f"""
             MATCH (f:File {{id:$file}})
             UNWIND $roots AS rid
             MATCH (r:{L} {{id:rid}}) MERGE (f)-[:{AR}]->(r)
-        """, file=file_id, roots=graph["roots"])
+        """, "roots", graph["roots"], file=file_id)
     if as_new_file:
-        session.run(f"""
+        _chunked(f"""
             MATCH (c:Commit {{id:$cid}})
             UNWIND $ids AS nid
             MATCH (a:{L} {{id:nid}})
             MERGE (c)-[:ADDS]->(a)
-        """, cid=commit_id, ids=[n["id"] for n in graph["nodes"]])
+        """, "ids", [n["id"] for n in graph["nodes"]], cid=commit_id)
 
 
 def delete_file(session, sp, commit_id, file_id):

@@ -101,11 +101,29 @@ def _docker_vol(host_datadir: Path) -> str:
     return f"{p}://data"
 
 
+# Neo4j distribution used for dump/load. The project's dumps carry kernel version
+# 29, which the 5.26 binaries in the neo4j:5 image refuse to open ("of a newer
+# version than the current binaries"). KGC_NEO4J_DIST points at a newer
+# distribution (e.g. ~/neo4j2026 = 2026.07.0) which is mounted into the transient
+# container; the image is then used only as a Java-21 runtime. NEO4J_HOME must be
+# overridden too, or the launcher silently loads the image's own older JARs.
+DIST = os.environ.get("KGC_NEO4J_DIST", "")
+
+
 def _admin(host_datadir: Path, *admin_args):
     """Run neo4j-admin in a transient container (main server must be stopped)."""
     env = dict(os.environ); env["MSYS_NO_PATHCONV"] = "1"
-    _sh("docker", "run", "--rm", "--user", "neo4j",
-        "-v", _docker_vol(host_datadir), IMAGE, "neo4j-admin", *admin_args, env=env)
+    if DIST:
+        _sh("docker", "run", "--rm", "--user", "neo4j",
+            "-e", "NEO4J_HOME=/newadmin",
+            "-v", f"{DIST}:/newadmin",
+            "-v", _docker_vol(host_datadir),
+            "--entrypoint", "/newadmin/bin/neo4j-admin", IMAGE,
+            *admin_args, env=env)
+    else:
+        _sh("docker", "run", "--rm", "--user", "neo4j",
+            "-v", _docker_vol(host_datadir), IMAGE, "neo4j-admin", *admin_args,
+            env=env)
 
 
 def _stop_server():

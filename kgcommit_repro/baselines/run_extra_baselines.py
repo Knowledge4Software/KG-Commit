@@ -27,6 +27,7 @@ Reads label CSV (+ diff CSV for JITLine) in place -- NO Neo4j, runs anywhere.
 Out: outputs/<project>/baseline_extra_results.pkl
 Run: KGC_PROJECT=zookeeper python baselines/run_extra_baselines.py
 """
+import os
 import pickle
 import sys
 from pathlib import Path
@@ -45,8 +46,9 @@ import scipy.sparse as sp
 
 # reuse the EXACT protocol + metrics from the existing baseline harness
 import run_baselines as rb   # noqa: E402
-from online_jit import final_metrics, BLOCK          # noqa: E402
-from online_infer import WARMUP_FRAC                 # noqa: E402
+from online_jit import final_metrics                 # noqa: E402
+# FINAL RUN: protocol constants from the single source of truth (see protocol.py).
+from protocol import WARMUP_FRAC, BLOCK, REFIT_EVERY  # noqa: E402
 import effort_metrics as em                          # noqa: E402
 from timing_probe import Probe                        # noqa: E402
 from run_subgraph_rq import metric_trajectory, TRAJ_STRIDE, TRAJ_WINDOW  # noqa: E402
@@ -188,12 +190,71 @@ def jitline_scores(df, y, cids_order, probe=None):
                 preds[idx] = clf.predict_proba(scaler.transform(Xfull[idx]))[:, 1]
         else:
             preds[idx] = clf.predict_proba(scaler.transform(Xfull[idx]))[:, 1]
-        if blk % 3 == 0:
+        if blk % REFIT_EVERY == 0:
             if probe is not None:
                 with probe.refit():
                     clf = fit(j)
             else:
                 clf = fit(j)
+        i = j; blk += 1
+    return preds, W
+
+
+def jitline_online_scores(df, y, cids_order, probe=None):
+    """JITLine_fully_online -- JITLine with an ONLINE textual model.
+
+    The incumbent `jitline_scores` fits its bag-of-tokens VOCABULARY once, on the
+    warm-up window, and never revisits it: only the RF is refit. A vocabulary frozen
+    at warm-up cannot represent identifiers, APIs or error types introduced later,
+    so on a long history JITLine is scored on an increasingly stale representation.
+    KG-Commit's CSTG, by contrast, refreshes its term layer every block.
+
+    This variant removes that asymmetry: the vocabulary AND the vectoriser are refit
+    on the expanding past window every REFIT_EVERY blocks, exactly like CSTG, so the
+    comparison isolates the representation rather than the update schedule. It is
+    strictly more expensive -- re-vectorising the whole past window each refit --
+    which is itself an RQ2 result, not a drawback.
+
+    Reported alongside (never instead of) the incumbent, so both the original
+    published behaviour and the fair-update behaviour are visible.
+    """
+    N = len(y); W = int(N * WARMUP_FRAC)
+    n_scored = N - W
+    toks = _load_diff_tokens(cids_order)
+    Xexp = df[JIT_COLS].fillna(0.0).to_numpy(float)
+
+    preds = np.full(N, np.nan)
+    clf = None; scaler = None; Xfull = None
+
+    def refit_representation(u):
+        """Rebuild vocabulary + matrix from the first `u` commits (past only)."""
+        _, Tok = _jitline_features(df, toks, u)
+        Xf = np.hstack([Xexp, Tok.toarray()])
+        sc = StandardScaler(with_mean=False).fit(Xf[:u])
+        model = _JITLineModel().fit(sc.transform(Xf[:u]), y[:u])
+        return Xf, sc, model
+
+    if probe is not None:
+        with probe.featurize(n=n_scored):
+            Xfull, scaler, clf = refit_representation(W)
+    else:
+        Xfull, scaler, clf = refit_representation(W)
+
+    i = W; blk = 0
+    while i < N:
+        j = min(N, i + BLOCK); idx = np.arange(i, j)
+        if probe is not None:
+            with probe.predict(n=len(idx)):
+                preds[idx] = clf.predict_proba(scaler.transform(Xfull[idx]))[:, 1]
+        else:
+            preds[idx] = clf.predict_proba(scaler.transform(Xfull[idx]))[:, 1]
+        if blk % REFIT_EVERY == 0:
+            # refit BOTH the representation and the model on the expanding past
+            if probe is not None:
+                with probe.refit():
+                    Xfull, scaler, clf = refit_representation(j)
+            else:
+                Xfull, scaler, clf = refit_representation(j)
         i = j; blk += 1
     return preds, W
 
@@ -234,17 +295,28 @@ def main():
     results["B_LAPREDICT"] = rb.evaluate(y, p, effort, w); preds_by["B_LAPREDICT"] = p
     timings["B_LAPREDICT"] = pr.finalize(n_scored=int(N - w))
 
-    print("  Deeper (autoencoder transform + LR) ...")
-    pr = Probe()
-    p, w = deeper_scores(df, y, effort, probe=pr)
-    results["B_DEEPER"] = rb.evaluate(y, p, effort, w); preds_by["B_DEEPER"] = p
-    timings["B_DEEPER"] = pr.finalize(n_scored=int(N - w))
+    # NOTE (final run): Deeper/DeepJIT is NOT part of the final baseline set --
+    # it is not being run. The function is retained for reproducibility of earlier
+    # results but is skipped here.
+    if os.environ.get("KGC_RUN_DEEPER") == "1":
+        print("  Deeper (autoencoder transform + LR) ...")
+        pr = Probe()
+        p, w = deeper_scores(df, y, effort, probe=pr)
+        results["B_DEEPER"] = rb.evaluate(y, p, effort, w); preds_by["B_DEEPER"] = p
+        timings["B_DEEPER"] = pr.finalize(n_scored=int(N - w))
 
-    print("  JITLine (RF on expert + diff tokens) ...")
+    print("  JITLine (RF on expert + diff tokens; vocab frozen at warm-up) ...")
     pr = Probe()
     p, w = jitline_scores(df, y, cids_order, probe=pr)
     results["B_JITLINE"] = rb.evaluate(y, p, effort, w); preds_by["B_JITLINE"] = p
     timings["B_JITLINE"] = pr.finalize(n_scored=int(N - w))
+
+    print("  JITLine_fully_online (vocabulary + model refit every block) ...")
+    pr = Probe()
+    p, w = jitline_online_scores(df, y, cids_order, probe=pr)
+    results["B_JITLINE_ONLINE"] = rb.evaluate(y, p, effort, w)
+    preds_by["B_JITLINE_ONLINE"] = p
+    timings["B_JITLINE_ONLINE"] = pr.finalize(n_scored=int(N - w))
 
     # per-baseline trajectories (accurate 150 + smoothed 800), same helper/resolution
     ev = np.arange(W, N); yt = y[ev]

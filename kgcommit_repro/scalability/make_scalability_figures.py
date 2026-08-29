@@ -20,6 +20,10 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 import _common as C
+# FINAL RUN: amortisation must use the live BLOCK, not a literal (see protocol.py).
+import sys as _sys, pathlib as _pl
+_sys.path.insert(0, str(_pl.Path(__file__).resolve().parent.parent / "inference"))
+from protocol import BLOCK as _BLOCK  # noqa: E402
 
 C.FIG.mkdir(parents=True, exist_ok=True)
 
@@ -172,7 +176,10 @@ def fig_pareto_cost_accuracy(lat, final_exp):
         # train cost folded in for embeddings
         if m in ("DW", "KGE"):
             tb = lat["final"]["train_ms_per_block"][m]["median"]
-            cost = cost + tb / 50.0     # amortise per-block refit across BLOCK=50
+            # amortise the per-block refit across the commits it serves. This MUST
+            # track protocol.BLOCK -- the old literal 50 would misreport the cost
+            # by BLOCK/50 once M changed.
+            cost = cost + tb / float(_BLOCK)
         acc = final_exp["final"][m]["metrics"]["Buggy_F1"]
         ax.scatter(cost, acc, color=OI[j], s=70)
         ax.annotate(m, (cost, acc), textcoords="offset points", xytext=(6, 3),
