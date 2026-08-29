@@ -42,18 +42,19 @@ from sklearn.utils.class_weight import compute_class_weight
 from sklearn.metrics import (roc_auc_score, average_precision_score, f1_score,
                              matthews_corrcoef, brier_score_loss,
                              precision_score, recall_score)
+from scipy.stats import rankdata
 import warnings; from sklearn.exceptions import ConvergenceWarning
 warnings.filterwarnings("ignore", category=ConvergenceWarning)
 import advanced_infer as ai, online_infer as oi
 
 import _kgc_paths  # noqa: F401  (adds package dirs to sys.path)
 from config.project_config import OUT  # per-project outputs/<project>/
-WARMUP_FRAC = 0.30      # initial fit window (commits 0..W are not scored)
-BLOCK       = 50        # learn/refresh granularity (predictions are per-commit)
-REFIT_EVERY = 4         # retrain tree / fusion models every N blocks
-SVD_REFRESH = 8         # refit the SVD embedding every N blocks
-ROLL        = 800       # rolling-metric window (commits)
-HASH_DIM    = 2**18
+# FINAL RUN: all protocol constants come from inference/protocol.py -- the single
+# source of truth. SVD_REFRESH is no longer an independent cadence: under the
+# single-M rule every component refreshes once per BLOCK.
+from protocol import (WARMUP_FRAC, BLOCK, GAP, ROLL, REFIT_EVERY, HASH_DIM,
+                      CLASS_WEIGHT)
+SVD_REFRESH = REFIT_EVERY   # kept as a name for readability; equals REFIT_EVERY
 
 GROUP = {  # method -> ('baseline'|'kg', pretty name)
     "B_LR_metrics":   ("baseline", "LR / JIT metrics (incremental)"),
@@ -102,6 +103,38 @@ def online_f1(p, y, init=300, step=150, gap=0):
     y = np.asarray(y)
     return float(f1_score(y, online_decisions(p, y, init, step, gap), zero_division=0))
 
+def _safe_auc(y, p):
+    """roc_auc_score, but never fatal.
+
+    sklearn builds the ROC by cumulative-summing over the score sort order and
+    then calls auc(), which raises "x is neither increasing nor decreasing" if
+    the resulting FPR array ever steps backwards. camel's BLOCK sweep hit this
+    on a rolling window. One degenerate window should not kill a whole sweep, so
+    fall back to the rank-based (Mann-Whitney U) identity -- exact for AUC, with
+    no monotonicity requirement -- and only then give up with NaN.
+    """
+    y = np.asarray(y)
+    p = np.asarray(p, float)
+    try:
+        return float(roc_auc_score(y, p))
+    except ValueError:
+        pos = y == 1
+        n_pos = int(pos.sum())
+        n_neg = int(len(y) - n_pos)
+        if n_pos == 0 or n_neg == 0:
+            return float("nan")
+        r = rankdata(p)          # average ranks handle ties exactly
+        return float((r[pos].sum() - n_pos * (n_pos + 1) / 2.0) / (n_pos * n_neg))
+
+
+def _safe_ap(y, p):
+    """average_precision_score with the same non-fatal contract as _safe_auc."""
+    try:
+        return float(average_precision_score(y, p))
+    except ValueError:
+        return float("nan")
+
+
 def cum_metrics(y, p):
     p = np.asarray(p, float)
     # NaN survives np.clip and makes sklearn's ROC sort non-monotonic
@@ -109,12 +142,12 @@ def cum_metrics(y, p):
     # base rate, or 0.5 when y itself is empty.
     if np.isnan(p).any():
         fill = float(np.mean(y)) if len(y) and not np.isnan(np.mean(y)) else 0.5
-        p = np.nan_to_num(p, nan=fill)
+        p = np.nan_to_num(p, nan=fill, posinf=1.0, neginf=0.0)
     p = np.clip(p, 0.0, 1.0)   # guard float drift (e.g. 1.0000002)
     yh = (p >= 0.5).astype(int)
     out = dict(ROC_AUC=float("nan"), PR_AUC=float("nan"))
     if len(np.unique(y)) > 1:
-        out["ROC_AUC"] = roc_auc_score(y, p); out["PR_AUC"] = average_precision_score(y, p)
+        out["ROC_AUC"] = _safe_auc(y, p); out["PR_AUC"] = _safe_ap(y, p)
     out.update(F1=f1_score(y, yh, zero_division=0), MCC=matthews_corrcoef(y, yh),
                Brier=brier_score_loss(y, p), Acc=float((yh == y).mean()))
     return out
@@ -272,12 +305,14 @@ def run_subset(S, metrics=False, tfidf=False, priors=False, ppr=False, text=Fals
         j = min(N, i+block); idx = np.arange(i, j)
         preds[idx] = clf.predict_proba(build(idx, scaler))[:, 1]
         lo = max(W, j-roll); sl = np.arange(lo, j)
-        cm = cum_metrics(y[sl], np.nan_to_num(preds[sl], nan=y[:i].mean()))
+        cm = cum_metrics(y[sl], np.nan_to_num(preds[sl], nan=y[:i].mean(),
+                                      posinf=1.0, neginf=0.0))
         traj["idx"].append(j); traj["ROC_AUC"].append(cm["ROC_AUC"]); traj["PR_AUC"].append(cm["PR_AUC"])
         if blk % refit == 0:
             scaler = fit_scaler(j); clf = _lr(sparse=True).fit(build(np.arange(j), scaler), y[:j])
         i = j; blk += 1
-    ev = np.arange(W, N); p = np.nan_to_num(preds[ev], nan=y[ev].mean())
+    ev = np.arange(W, N)
+    p = np.nan_to_num(preds[ev], nan=y[ev].mean(), posinf=1.0, neginf=0.0)
     return dict(cum=final_metrics(y[ev], p), traj=traj, p=p, y=y[ev])
 
 def ablation_all(S):
@@ -376,7 +411,8 @@ def main():
         # --- EVALUATE: rolling-window metrics trajectory ---
         lo = max(W, j-ROLL); sl = np.arange(lo, j)
         for m in GROUP:
-            cm = cum_metrics(y[sl], np.nan_to_num(preds[m][sl], nan=y[:i].mean()))
+            cm = cum_metrics(y[sl], np.nan_to_num(preds[m][sl], nan=y[:i].mean(),
+                                          posinf=1.0, neginf=0.0))
             traj[m]["idx"].append(j); traj[m]["ROC_AUC"].append(cm["ROC_AUC"]); traj[m]["PR_AUC"].append(cm["PR_AUC"])
         # === LEARN: update models with the now-known block ===
         sgd_lr.partial_fit(Xms[idx], y[idx]); sgd_tf.partial_fit(Xh[idx], y[idx])
@@ -396,7 +432,8 @@ def main():
     print(f"\n{'method':<34}{'F1_on':>7}{'F1@.5':>7}{'PR':>7}{'ROC':>7}{'MCC':>7}")
     print("-"*68)
     for m in GROUP:
-        p = np.nan_to_num(preds[m][ev], nan=y[ev].mean())
+        p = np.nan_to_num(preds[m][ev], nan=y[ev].mean(),
+                            posinf=1.0, neginf=0.0)
         cm = final_metrics(y[ev], p)
         results["methods"][m] = dict(group=GROUP[m][0], name=GROUP[m][1],
                                      y=y[ev], p=p, cum=cm)

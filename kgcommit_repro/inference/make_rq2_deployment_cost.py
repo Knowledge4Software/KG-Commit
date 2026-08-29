@@ -41,9 +41,10 @@ DISPLAY = [("B_LR", "LR"), ("B_HGB", "HGB"), ("B_LAPREDICT", "LApredict"),
            ("B_DEEPER", "Deeper"), ("B_JITLINE", "JITLine")]
 
 
-# protocol constants governing how often KG-Commit's trainable parts are refit
-BLOCK = 200        # online_infer.BLOCK: commits per prediction block
-REFIT_EMB = 5      # run_final_experiments: DW/KGE re-embed every REFIT_EMB blocks
+# Protocol constants governing how often KG-Commit's trainable parts are refit.
+# These MUST track the runtime, not be restated: the refit term is amortised as
+# cost/(REFIT_EMB*BLOCK), so a stale literal misreports the cost directly.
+from protocol import BLOCK, REFIT_EVERY as REFIT_EMB  # noqa: F401
 
 
 def kg_cost(folder):

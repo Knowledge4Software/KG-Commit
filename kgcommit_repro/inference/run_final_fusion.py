@@ -36,10 +36,17 @@ import run_final_experiments as rfe
 import _kgc_paths  # noqa: F401  (adds package dirs to sys.path)
 from config.project_config import OUT  # per-project outputs/<project>/
 FIG = OUT / "figures" / "v4" / "final"; FIG.mkdir(parents=True, exist_ok=True)
+# FINAL RUN: the fusion head refits on the single-M cadence and honours the
+# verification-latency gap G. Both were previously hardcoded here (refit=3, gap=0).
+from protocol import (OVERALL_F, REFIT_EVERY, GAP, init_window,
+                      INIT_CAP as P_INIT_CAP)
 METHODS = rfe.METHODS                         # RN, PPR, LP, DW, KGE
 M7 = [("Precision", "Prec."), ("Recall", "Rec."), ("Macro_F1", "Macro-F1"),
       ("Buggy_F1", "Buggy-F1"), ("G_Mean", "G-Mean"), ("AUC", "AUC"), ("ACC", "Acc.")]
-INIT = 300; TOL = 0.005
+# INIT is now ADAPTIVE (protocol.init_window): a flat 300 defeated K=0.05 by putting
+# a 300-commit dead zone after a 41-commit warm-up. The value below is only the
+# fallback/cap; main() computes the per-project window from the labels.
+INIT = P_INIT_CAP; TOL = 0.005
 
 
 def _lr():
@@ -65,7 +72,7 @@ def channel_score(X, y, W, N, sparse=False, gap=0):
     return pred
 
 
-def eval_subset(scores, subset, y, W, N, init=INIT, refit=3, gap=0):
+def eval_subset(scores, subset, y, W, N, init=INIT, refit=REFIT_EVERY, gap=GAP):
     """Metrics + rolling trajectory + preds for a fused subset over [W+init, N].
     Size-1 subsets use the raw method score; size>1 use prequential LR stacking.
     `gap` (verification-latency G): the fusion head refits on labels only up to
@@ -77,7 +84,21 @@ def eval_subset(scores, subset, y, W, N, init=INIT, refit=3, gap=0):
     else:
         Z = np.column_stack([np.nan_to_num(scores[m], nan=y[:W].mean()) for m in subset])
         p_all = np.full(N, np.nan); i = ev0; blk = 0
+        # INITIAL-FIT WINDOW BUG (fixed): u0 was max(W, ev0-gap). When the adaptive
+        # INIT equals the gap -- e.g. spark W=73, init=50, gap=50 -> ev0-gap = 73 = W
+        # -- the window Z[W:u0] collapses to ZERO rows, clf stays None, and the whole
+        # of block 0 falls back to the constant y[:i].mean(). On spark that constant
+        # (0.2195) is below the 0.5 threshold, so every commit in block 0 was
+        # predicted benign while 61% were buggy: macro-F1 0.281 on that block, and
+        # -0.042 on the project. Single-method subsets skip this branch entirely,
+        # which is why F (=PPR) was healthy while F+G was not.
+        #
+        # Fix: never let the initial window be empty. Prefer the gap-respecting
+        # window, but if it is too small fall back to [W, ev0) -- still strictly
+        # past-only (ev0 is where scoring starts), so no future label is used.
         u0 = max(W, ev0 - gap)
+        if u0 - W < 2 or len(set(y[W:u0])) < 2:
+            u0 = ev0                      # past-only widening, no leakage
         clf = _lr().fit(Z[W:u0], y[W:u0]) if u0 - W >= 2 and len(set(y[W:u0])) > 1 else None
         while i < N:
             j = min(N, i + BLOCK); idx = np.arange(i, j)
@@ -93,13 +114,34 @@ def eval_subset(scores, subset, y, W, N, init=INIT, refit=3, gap=0):
 def main():
     commits, cids, y, files, devs, tok, cstg = rfe.load_all()
     N = len(cids); W = int(N * rfe.WARMUP_FRAC)
-    print(f"final graph: 5 method scores (W={W}) ...")
+    # adaptive stacking-head window (see protocol.init_window)
+    INIT_P = init_window(y, W)
+    _seg = np.asarray(y)[W:W + INIT_P]
+    _minor = min(int(_seg.sum()), int(_seg.size - _seg.sum())) if _seg.size else 0
+    print(f"final graph: 5 method scores (W={W}, init={INIT_P} "
+          f"[{_minor} minority], scoring starts at {W+INIT_P}) ...")
     _, preds = rfe.run_graph("final", cids, y, files, devs, tok, cstg)
     scores = {m: preds[m] for m in METHODS}
 
-    # M (JIT metrics) and G (CSTG) prequential channel scores, aligned to cids/W
-    S = pickle.load(open(OUT / "online_jit_streams_v5.pkl", "rb"))
-    assert np.array_equal(np.asarray(S["y"]), y), "streams_v5 not aligned to cids"
+    # M (JIT metrics) and G (CSTG) prequential channel scores, aligned to cids/W.
+    #
+    # The stream cache is keyed only by filename, so a cache left over from an
+    # EARLIER build of the same project will silently disagree with the graph now
+    # resident (groovy: 8,039 cached commits vs 8,059 in the restored graph). That
+    # previously raised AssertionError and aborted the whole project, skipping
+    # fusion, subgraph RQ, baselines, seeds and sweeps -- while the run still
+    # printed DONE. Detect the staleness and REBUILD instead of failing.
+    _sp = OUT / "online_jit_streams_v5.pkl"
+    S = pickle.load(open(_sp, "rb")) if _sp.exists() else None
+    if S is None or not np.array_equal(np.asarray(S["y"]), y):
+        if S is not None:
+            print(f"  stream cache stale ({len(S['y'])} commits vs {len(y)} in the "
+                  f"graph) -- rebuilding", flush=True)
+            _sp.rename(_sp.with_suffix(".pkl.stale"))
+        import online_jit as _oj
+        S = _oj.precompute_streams(force=True)
+    assert np.array_equal(np.asarray(S["y"]), y), \
+        "streams_v5 still not aligned to cids after rebuild"
     Xms = StandardScaler().fit(S["Xms"][:W]).transform(S["Xms"])
     scores["M"] = channel_score(Xms, y, W, N)
     Gfeat = sp.hstack([sp.csr_matrix(np.hstack([S["cstg_prior"][:, None], S["cstg_typed"],
@@ -112,7 +154,7 @@ def main():
     for r in range(1, 6):
         for combo in itertools.combinations(METHODS, r):
             key = "+".join(combo)
-            m, tr, _, _ = eval_subset(scores, list(combo), y, W, N)
+            m, tr, _, _ = eval_subset(scores, list(combo), y, W, N, init=INIT_P)
             part1[key] = dict(methods=list(combo), n=r, metrics=m, traj=tr)
     # choose F by Macro-F1 (the project's primary metric): the smallest combo
     # whose Macro-F1 is within TOL of the best Macro-F1 (parsimony tie-break).
@@ -124,36 +166,66 @@ def main():
           f"(Macro-F1={chosen['metrics']['Macro_F1']:.3f}, G-Mean={chosen['metrics']['G_Mean']:.3f})")
 
     # ---- Part 2: F, F+G, F+M, F+G+M ----
+    # FINAL RUN: TWO fusion selection rules are evaluated and fully reported.
+    #   (a) per-project  -- the incumbent rule: best combo for THIS project.
+    #   (b) overall      -- one combo fixed across all projects (protocol.OVERALL_F),
+    #                       chosen by macro-mean Macro-F1 over the 11 projects.
+    # Neither is leakage: both exhaustively score all 31 combinations and report the
+    # best, as a characterisation experiment. The paper may ultimately headline
+    # either, so every artifact is produced for BOTH.
     print("Part 2: F (+G/+M/+G+M) ...")
+
+    def _part2_for(F, tag):
+        p2, raws, ev0_ref = {}, {}, None
+        for name, extra in [("F", []), ("F+G", ["G"]),
+                            ("F+M", ["M"]), ("F+G+M", ["G", "M"])]:
+            m, tr, p_ev, ev0 = eval_subset(scores, F + extra, y, W, N, init=INIT_P)
+            tr_smooth = rfe.metric_traj(y[np.arange(ev0, N)], p_ev, ev0,
+                                        roll=rfe.TRAJ_WINDOW_SMOOTH)
+            p2[name] = dict(methods=F + extra, metrics=m,
+                            traj=tr, traj_smooth=tr_smooth)
+            raws[name] = p_ev.astype(np.float32); ev0_ref = ev0
+        print(f"  [{tag}] F = {'+'.join(F)}  "
+              f"Macro-F1={p2['F+G']['metrics']['Macro_F1']:.3f} (F+G)")
+        return p2, raws, ev0_ref
+
+    # (a) per-project best F -- the headline series, kept under the original keys
     F = chosen["methods"]
-    part2 = {}
-    raw_fusion = {}   # name -> raw per-commit fused score over [ev0, N] (+ eval start)
-    ev0_ref = None
-    for name, extra in [("F", []), ("F+G", ["G"]), ("F+M", ["M"]), ("F+G+M", ["G", "M"])]:
-        m, tr, p_ev, ev0 = eval_subset(scores, F + extra, y, W, N)
-        tr_smooth = rfe.metric_traj(y[np.arange(ev0, N)], p_ev, ev0,
-                                    roll=rfe.TRAJ_WINDOW_SMOOTH)
-        part2[name] = dict(methods=F + extra, metrics=m, traj=tr, traj_smooth=tr_smooth)
-        raw_fusion[name] = p_ev.astype(np.float32); ev0_ref = ev0
+    part2, raw_fusion, ev0_ref = _part2_for(F, "per-project")
+
+    # (b) overall best F -- same evaluation, fixed combo, stored alongside
+    F_overall = [m for m in OVERALL_F if m in METHODS]
+    overall_key = "+".join(F_overall)
+    part2_overall, raw_overall, _ = _part2_for(F_overall, "overall")
 
     pickle.dump(dict(part1=part1, chosen=chosen_key, part2=part2, F=F,
-                     meta=dict(W=W, N=N, init=INIT)), open(OUT / "final_fusion_results.pkl", "wb"))
+                     # --- second selection rule, fully evaluated ---
+                     chosen_overall=overall_key, part2_overall=part2_overall,
+                     F_overall=F_overall,
+                     meta=dict(W=W, N=N, init=INIT_P, init_adaptive=True,
+                               init_minority=_minor, ev0=W + INIT_P,
+                               selection_rules=["per-project", "overall"])),
+                open(OUT / "final_fusion_results.pkl", "wb"))
+    _persist_raw_fusion(raw_overall, y, ev0_ref, N, suffix="_overall")
     _persist_raw_fusion(raw_fusion, y, ev0_ref, N)
     make_figures(part1, chosen_key, part2, scores, y, W, N)
     print(f"saved -> {OUT/'final_fusion_results.pkl'} + figures")
 
 
-def _persist_raw_fusion(raw_fusion, y, ev0, N):
+def _persist_raw_fusion(raw_fusion, y, ev0, N, suffix=""):
     """Dump the raw per-commit fused scores (F / F+G / F+M / F+G+M) over the
     evaluation span [ev0, N) to .pkl + .csv, so any future re-smoothing / operating-
-    point change needs no Neo4j rebuild."""
+    point change needs no Neo4j rebuild.
+
+    `suffix` distinguishes the two fusion selection rules: "" = per-project best F,
+    "_overall" = the fixed overall-best F."""
     import csv
     ev = np.arange(ev0, N)
     pickle.dump(dict(names=list(raw_fusion.keys()), ev0=ev0, N=N,
                      commit_index=ev, y=np.asarray(y[ev], dtype=np.int8),
                      scores=raw_fusion),
-                open(OUT / "raw_fusion_scores.pkl", "wb"))
-    with open(OUT / "raw_fusion_scores.csv", "w", newline="") as fh:
+                open(OUT / f"raw_fusion_scores{suffix}.pkl", "wb"))
+    with open(OUT / f"raw_fusion_scores{suffix}.csv", "w", newline="") as fh:
         w = csv.writer(fh); w.writerow(["commit_index", "y"] + list(raw_fusion.keys()))
         for k, i in enumerate(ev):
             w.writerow([int(i), int(y[i])] +

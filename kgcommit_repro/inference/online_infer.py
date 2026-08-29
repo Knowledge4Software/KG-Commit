@@ -41,11 +41,12 @@ from sklearn.metrics import (roc_auc_score, average_precision_score, f1_score,
                              matthews_corrcoef)
 from advanced_infer import load_kg, ppr, METRICS, ALPHA, PPR_ITERS
 
-WARMUP_FRAC=0.40
-BLOCK=200
-SVD_DIM=64
-SVD_REFIT_EVERY=5      # refit the SVD embedding every N blocks
-HASH_DIM=2**18
+# FINAL RUN: constants come from inference/protocol.py. This module previously
+# declared WARMUP_FRAC=0.40 / BLOCK=200 independently of online_jit.py (0.30 / 50),
+# which is exactly the drift protocol.py exists to prevent.
+from protocol import (WARMUP_FRAC, BLOCK, GAP, SVD_DIM, HASH_DIM, REFIT_EVERY,
+                      CLASS_WEIGHT)
+SVD_REFIT_EVERY = REFIT_EVERY   # single-M rule: refresh once per BLOCK
 
 # ── incidence (commits x hubs) + PPR transition, built once ──────────────────
 def build_incidence(cids, tokens, files, devs):
@@ -128,7 +129,7 @@ def main():
 
     preds={k:np.full(Nc,np.nan) for k in
            ["O1_jit","O2_wvrn","O3_tfidf","O4_ppr","O5_kge","O6_fusion"]}
-    REFIT_EVERY=3            # refit trainable models on the expanding past window
+    # REFIT_EVERY comes from protocol.py (single-M rule: refit every block).
     jit_clf=tf_clf=fus_clf=svd=svd_clf=None; E=None; blk=0
     i=w
     while i<Nc:

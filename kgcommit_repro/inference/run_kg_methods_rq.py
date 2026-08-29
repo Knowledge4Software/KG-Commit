@@ -21,8 +21,8 @@ import kg_methods as km
 
 import _kgc_paths  # noqa: F401  (adds package dirs to sys.path)
 from config.project_config import OUT  # per-project outputs/<project>/
-REFIT_EMB = 6          # refit DeepWalk / KGE embeddings every N blocks
-DW_DIM = 64; KGE_DIM = 32
+# FINAL RUN: single-M rule -- embeddings refit once per BLOCK, like everything else.
+from protocol import REFIT_EVERY as REFIT_EMB, DW_DIM, KGE_DIM
 
 VARIANTS = [
     ("V1_none", "none (core only)", None,      None),

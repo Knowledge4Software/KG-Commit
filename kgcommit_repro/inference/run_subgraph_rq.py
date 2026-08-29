@@ -39,17 +39,15 @@ from online_jit import final_metrics, cum_metrics, online_decisions
 
 import _kgc_paths  # noqa: F401  (adds package dirs to sys.path)
 from config.project_config import OUT  # per-project outputs/<project>/
-REFIT_EVERY = 3
-SVD_DIM = 64
-SVD_REFRESH = 5     # refit the KG (SVD/LSA) embedding every N blocks
-ROLL = 800          # rolling-window size for the cumulative Fusion (ROC/PR) traj
+# FINAL RUN: single-M rule -- see inference/protocol.py.
+from protocol import REFIT_EVERY, SVD_DIM, ROLL
+SVD_REFRESH = REFIT_EVERY   # refresh once per BLOCK, like every other component
 # --- online-trajectory VISUALISATION resolution (see docs, chosen from the
 # stride/window comparison). These control ONLY how finely the 7-metric stream
 # curve is sampled/smoothed for the figures; they do NOT affect the online
 # protocol (BLOCK prediction granularity) or the headline metrics. A smaller
 # stride = more points (higher sampling rate); a smaller window = less smoothing.
-TRAJ_STRIDE = 25    # sample a trajectory point every N commits (was BLOCK)
-TRAJ_WINDOW = 150   # rolling window each point averages over (was ROLL=800)
+from protocol import TRAJ_STRIDE, TRAJ_WINDOW  # noqa: E402
 
 # the inference methods compared per subgraph. M (JIT metrics) and R (relational
 # priors) do NOT use the structural tokens, so they are subgraph-INDEPENDENT
@@ -139,7 +137,14 @@ def run_variant(node_label, type_prop):
     ppr_full = np.zeros(Nc)
 
     def fuse_dense(idx, sc):
-        return sc.transform(np.hstack([Xms[idx], Xp[idx], ppr_full[idx][:, None]]))
+        # Xms is ALREADY standardised; sc standardises again. Where a column has
+        # near-zero variance in the past window (e.g. ppr_full is all-zero in the
+        # first blocks) the second division explodes to >1e30, which liblinear
+        # rejects outright ("frozen fit"). Clip to a sane range and scrub any
+        # non-finite value so the fit stays well-posed.
+        Z = sc.transform(np.hstack([Xms[idx], Xp[idx], ppr_full[idx][:, None]]))
+        Z = np.nan_to_num(Z, nan=0.0, posinf=0.0, neginf=0.0)
+        return np.clip(Z, -1e6, 1e6)
     def fuse(idx, sc):
         return sp.hstack([sp.csr_matrix(fuse_dense(idx, sc)), Xh[idx]]).tocsr()
 

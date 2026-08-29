@@ -62,7 +62,7 @@ def sweep_roll(S, values=(200, 400, 800, 1600)):
     p, y, W, N = r["p"], r["y"], S["W"], S["N"]
     for roll in values:
         lo = max(0, len(y) - roll)
-        cm = OJ.cum_metrics(y[lo:], np.clip(np.nan_to_num(p[lo:], nan=float(y.mean())), 0, 1))
+        cm = OJ.cum_metrics(y[lo:], np.clip(np.nan_to_num(p[lo:], nan=float(y.mean()), posinf=1.0, neginf=0.0), 0, 1))
         out[str(roll)] = {k: float(cm.get(k, float("nan")))
                           for k in ("ROC_AUC", "PR_AUC", "F1", "MCC")}
     return out

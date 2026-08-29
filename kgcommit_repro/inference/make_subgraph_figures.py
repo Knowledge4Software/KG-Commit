@@ -31,7 +31,9 @@ from config.project_config import OUT  # per-project outputs/<project>/
 FIG = OUT / "figures" / "v4"; FIG.mkdir(parents=True, exist_ok=True)
 
 # fixed variant order + Okabe-Ito CVD-safe colours (AST = bold vermillion accent)
-ORDER  = ["V1_none", "V2a_cfg", "V2b_dfg", "V2c_pdg", "V2d_seq", "V2e_ast_method", "V3_ast"]
+# V2e_ast_method was DROPPED from the final methodology -- excluded here even when a
+# project's subgraph_rq_results.pkl still carries it.
+ORDER  = ["V1_none", "V2a_cfg", "V2b_dfg", "V2c_pdg", "V2d_seq", "V3_ast"]
 SHORT  = {"V1_none": "Core\n(no subgraph)", "V2a_cfg": "CFG", "V2b_dfg": "DFG",
           "V2c_pdg": "PDG/CPG", "V2d_seq": "Token-seq", "V2e_ast_method": "AST-m", "V3_ast": "AST"}
 COLOR  = {"V1_none": "#999999", "V2a_cfg": "#56B4E9", "V2b_dfg": "#009E73",
@@ -153,9 +155,11 @@ def fig_trajectory(res):
 
 
 def fig_layer_sizes(stats):
-    layers = ["ast_method", "ast", "cfg", "dfg", "pdg", "seq"]
-    vmap = {"ast": "V3_ast", "ast_method": "V2e_ast_method", "cfg": "V2a_cfg", "dfg": "V2b_dfg",
+    # ast_method dropped from the final methodology; also skip any layer absent
+    # from this project's stats.
+    vmap = {"ast": "V3_ast", "cfg": "V2a_cfg", "dfg": "V2b_dfg",
             "pdg": "V2c_pdg", "seq": "V2d_seq"}
+    layers = [l for l in ["ast", "cfg", "dfg", "pdg", "seq"] if l in stats]
     fig, axes = plt.subplots(1, 2, figsize=(11, 4.2))
     for ax, key, title in [(axes[0], "nodes", "nodes per layer"),
                            (axes[1], "delta_total", "delta-edges per layer")]:

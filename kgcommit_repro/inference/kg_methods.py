@@ -183,9 +183,21 @@ def kge_embed(edges, Nc, Nh, past_mask, dim=32, epochs=3, neg=3, lr=0.05, seed=0
             Ec[c] -= lr * gpos * (R[r] * Eh[h])
             Eh[h] -= lr * gpos * (Ec[c] * R[r])
             R[r]  -= lr * gpos * (Ec[c] * Eh[h])
+        # DistMult's triple-product gradient is unbounded: on dense layers (e.g.
+        # camel's AST) plain SGD can overflow to inf, and inf*0 then poisons the
+        # fold-in with NaN. Clip row norms each epoch to keep training finite.
+        # CLIP is far above the scale converged runs reach, so results that were
+        # already stable are unaffected.
+        CLIP = 10.0
+        for M in (Eh, Ec, R):
+            np.nan_to_num(M, copy=False, nan=0.0, posinf=CLIP, neginf=-CLIP)
+            n = np.linalg.norm(M, axis=1, keepdims=True)
+            np.divide(M, np.maximum(n / CLIP, 1.0), out=M)
     # fold-in EVERY commit from its hubs (known at arrival) -> mean of r*hub
     emb = np.zeros((Nc, dim)); cnt = np.zeros(Nc)
     ci_all, ri_all, hi_all = edges[:, 0], edges[:, 1], edges[:, 2]
     np.add.at(emb, ci_all, R[ri_all] * Eh[hi_all])
     np.add.at(cnt, ci_all, 1.0)
-    return emb / np.maximum(cnt[:, None], 1.0)
+    emb = emb / np.maximum(cnt[:, None], 1.0)
+    # final guard: downstream LogisticRegression rejects NaN/inf outright
+    return np.nan_to_num(emb, copy=False, nan=0.0, posinf=0.0, neginf=0.0)

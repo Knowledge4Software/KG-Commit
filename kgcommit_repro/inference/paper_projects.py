@@ -18,10 +18,17 @@ justification, or (b) fix the multi-repo issues and include them in the final pa
 """
 
 # (display name, output-folder name)
+# FINAL RUN: the paper set is the ELEVEN projects that were re-run end to end.
+# ignite is not part of the study; hadoop-hdfs / hadoop-mapreduce stay dropped
+# (see the rationale above) and are listed under DROPPED.
 ACTIVE = [
     ("ActiveMQ", "activemq"),
+    ("Camel", "camel"),
     ("Cassandra", "cassandra"),
+    ("Flink", "flink"),
     ("Groovy", "groovy"),
+    ("HBase", "hbase"),
+    ("Hive", "hive"),
     ("Kafka", "kafka"),
     ("Spark", "spark"),
     ("Zeppelin", "zeppelin"),

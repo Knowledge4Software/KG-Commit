@@ -25,8 +25,10 @@ import cstg as C
 import _kgc_paths  # noqa: F401  (adds package dirs to sys.path)
 from config.project_config import OUT as _OUT, DIFF_CSV as DIFFS, PROJECT_KEY as _PKEY
 ROOT = _OUT                              # per-project outputs/<project>/ (cache root)
-HASH_DIM = 2 ** 18
-PROP_REFRESH = 400        # recompute NPMI + propagate every N commits (past-only)
+# FINAL RUN: the CSTG refresh joins the single-M rule. NOTE this constant is in
+# COMMITS, not blocks -- it becomes BLOCK (=M), i.e. one refresh per block, matching
+# the fusion head, the embeddings and the baselines. It was 400 = 2M.
+from protocol import HASH_DIM, BLOCK as PROP_REFRESH  # noqa: F401
 PROP_ITERS = 4
 PROP_DAMP = 0.5
 NPMI_MIN = 0.3

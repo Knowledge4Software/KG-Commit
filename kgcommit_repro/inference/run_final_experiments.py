@@ -32,12 +32,14 @@ from online_jit import final_metrics, online_decisions
 import _kgc_paths  # noqa: F401  (adds package dirs to sys.path)
 from config.project_config import OUT  # per-project outputs/<project>/
 from config.project_config import NEO4J_URI, NEO4J_AUTH
-REFIT_EMB = 5; DW_DIM = 64; KGE_DIM = 32; ROLL = 800
+# FINAL RUN: cadence and sizes come from inference/protocol.py (single-M rule).
+from protocol import (REFIT_EVERY as REFIT_EMB, DW_DIM, KGE_DIM, ROLL,
+                      WARMUP_FRAC as _P_WARMUP, BLOCK as _P_BLOCK, GAP as _P_GAP)
 # online-trajectory VISUALISATION resolution: two versions are persisted for
 # every stream -- the ACCURATE view (window=150, stride=25) and the SMOOTHED view
 # (window=800, stride=25). Both are visualisation-only; neither affects the
 # protocol or the end-of-stream metrics.
-TRAJ_STRIDE = 25; TRAJ_WINDOW = 150; TRAJ_WINDOW_SMOOTH = 800
+from protocol import TRAJ_STRIDE, TRAJ_WINDOW, TRAJ_WINDOW_SMOOTH  # noqa: E402
 
 GRAPHS = ["core", "ast", "cfg", "dfg", "pdg", "final"]   # ast_method dropped (unused)
 # final2 is an OPT-IN probe graph (Core+AST+CFG+CSTG) used only to test whether a

@@ -16,7 +16,9 @@ import _kgc_paths  # noqa: F401  (adds package dirs to sys.path)
 from config.project_config import OUT  # per-project outputs/<project>/
 TAB = OUT / "tables" / "v4"; TAB.mkdir(parents=True, exist_ok=True)
 
-ORDER = ["V1_none", "V2a_cfg", "V2b_dfg", "V2c_pdg", "V2d_seq", "V2e_ast_method", "V3_ast"]
+# V2e_ast_method was DROPPED from the final methodology -- excluded here even when a
+# project's subgraph_rq_results.pkl still carries it.
+ORDER = ["V1_none", "V2a_cfg", "V2b_dfg", "V2c_pdg", "V2d_seq", "V3_ast"]
 NAME  = {"V1_none": "Core (no subgraph)", "V2a_cfg": "CFG", "V2b_dfg": "DFG",
          "V2c_pdg": "PDG/CPG", "V2d_seq": "Token-seq", "V2e_ast_method": "AST-m", "V3_ast": "AST"}
 SHORT = {"V1_none": "Core", "V2a_cfg": "CFG", "V2b_dfg": "DFG",
@@ -116,7 +118,9 @@ def main():
           r"\begin{tabular}{lrrrrr}", r"\toprule",
           r"Layer & Nodes & Delta-edges & Node types & Token types & Commits w/ tok. \\",
           r"\midrule"]
-    for v in ["V3_ast", "V2e_ast_method", "V2a_cfg", "V2b_dfg", "V2c_pdg", "V2d_seq"]:
+    for v in ["V3_ast", "V2a_cfg", "V2b_dfg", "V2c_pdg", "V2d_seq"]:
+        if SKEY[v] not in stats:
+            continue
         s = stats[SKEY[v]]
         L2.append(f"{NAME[v]} & {s['nodes']:,} & {s['delta_total']:,} & "
                   f"{s['n_node_types']} & {s['n_token_types']} & "

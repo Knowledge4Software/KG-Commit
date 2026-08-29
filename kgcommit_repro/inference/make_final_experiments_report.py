@@ -32,7 +32,14 @@ TAB = out_dir / "tables" / "v4"; FIG = out_dir / "figures" / "v4" / "final"
 TAB.mkdir(parents=True, exist_ok=True); FIG.mkdir(parents=True, exist_ok=True)
 
 R = pickle.load(open(out_dir / "final_experiments_results.pkl", "rb"))
-GRAPHS = ["core", "ast", "ast_method", "cfg", "dfg", "pdg", "final"]
+# ast_method (the per-method AST variant) was DROPPED from the final methodology, so
+# the main tree stays on the final 6-graph family even when a project's pickle still
+# carries ast_method data. The dedicated v4_ast_method/ side branch is the one place
+# it belongs, so keep it there (that branch exists precisely to study it).
+_SIDE_BRANCH = "ast_method" in (args.outdir_suffix or "")
+GRAPHS = ["core", "ast", "cfg", "dfg", "pdg", "final"]
+if _SIDE_BRANCH and "ast_method" in R:
+    GRAPHS.insert(2, "ast_method")
 GNAME = {"core": "Core", "ast": "Core+AST", "ast_method": "Core+AST-m", "cfg": "Core+CFG", "dfg": "Core+DFG",
          "pdg": "Core+PDG", "final": "Core+AST+CSTG"}
 GSHORT = {"core": "Core", "ast": "+AST", "ast_method": "+AST-m", "cfg": "+CFG", "dfg": "+DFG",

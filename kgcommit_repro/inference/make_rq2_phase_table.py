@@ -49,8 +49,8 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 OUTP = ROOT / "outputs"
 PM = ROOT / "Paper" / "paper_material" / "RQ2_scalability"
 
-BLOCK = 200        # online_infer.BLOCK
-REFIT_EMB = 5      # DW/KGE re-embed cadence, in blocks
+# Must track the runtime -- the refit term is divided by (REFIT_EMB*BLOCK).
+from protocol import BLOCK, REFIT_EVERY as REFIT_EMB  # noqa: F401
 
 MODELS = [("B_LR", "LR"), ("B_HGB", "HGB"), ("B_LAPREDICT", "LApredict"),
           ("B_DEEPER", "Deeper"), ("B_JITLINE", "JITLine")]
