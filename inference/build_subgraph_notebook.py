@@ -14,8 +14,11 @@ from nbformat.v4 import new_notebook, new_markdown_cell, new_code_cell
 from pathlib import Path
 import subprocess, sys
 
+import _kgc_paths  # noqa: F401  (adds package dirs to sys.path)
+from config.project_config import OUT as _OUT
 ROOT = Path(__file__).resolve().parent.parent
-NB   = ROOT / "experiments" / "notebooks" / "subgraph_ablation_v4.ipynb"
+NB   = _OUT / "notebooks" / "subgraph_ablation_v4.ipynb"   # per-project
+NB.parent.mkdir(parents=True, exist_ok=True)
 
 md, code = new_markdown_cell, new_code_cell
 cells = []
@@ -62,10 +65,11 @@ import matplotlib.pyplot as plt
 from IPython.display import Image, display
 %matplotlib inline
 
-OUT = Path.cwd()
-while not (OUT / "outputs").exists() and OUT != OUT.parent:
-    OUT = OUT.parent
-OUT = OUT / "outputs"
+import os
+_root = Path.cwd()
+while not (_root / "outputs").exists() and _root != _root.parent:
+    _root = _root.parent
+OUT = _root / "outputs" / os.environ.get("KGC_PROJECT", "groovy")   # per-project
 res   = pickle.load(open(OUT / "subgraph_rq_results.pkl", "rb"))
 stats = json.load(open(OUT / "subgraph_layer_stats.json"))
 FIG   = OUT / "figures" / "v4"
@@ -221,7 +225,7 @@ display(Image(filename=str(FIG / "fig_metrics_fusion.png")))"""))
 cells.append(md(r"""### Online-evaluation trend per metric (stream plots)
 
 For each headline metric we plot the **rolling prequential value against the commit
-index** in the chronological stream (window = 800 commits), one line per subgraph
+index** in the chronological stream (window = 150 commits, stride = 25), one line per subgraph
 (deployed Fusion). This is the streaming/online view of the comparison: it shows
 not just the end-of-stream number but how each subgraph tracks over time. **AST
 (bold) leads or ties at essentially every point on every metric**, and **Core
@@ -288,91 +292,11 @@ cells.append(md(r"""### What the graph-native methods show
   scope) from "what the deployed heterogeneous graph achieves" (full scope),
   removing the file/developer confound identified in the audit."""))
 
-cells.append(md(r"""## 7. Choosing the final Fusion — comprehensive ablation
-
-To choose a defensible final Fusion formula we ablate **all combinations** of ten
-inference methods on the **final graph (Core + AST + CSTG, no X)**: previous
-M, R, T, P, E, G(CSTG) and new RN, LP, DW, KGE. Two fusion styles are compared —
-**score stacking** (prequential LR over the selected methods' probabilities; all
-$2^{10}-1=1023$ subsets) and **feature fusion** (concatenated raw blocks of the top
-channels; all $2^6-1=63$ subsets). All seven metrics, online-tuned operating point
-(`inference/run_fusion_ablation.py`)."""))
-
-cells.append(code(r"""import pickle as _pk
-FA = _pk.load(open(OUT / "fusion_ablation_results.pkl", "rb"))
-M7L = [("Precision","Prec."),("Recall","Rec."),("Macro_F1","Macro-F1"),
-       ("Buggy_F1","Buggy-F1"),("G_Mean","G-Mean"),("AUC","AUC"),("ACC","Acc.")]
-# singles ranked
-sing = sorted([v for v in FA["stack"].values() if len(v["methods"])==1],
-              key=lambda v:-v["Buggy_F1"])
-sdf = pd.DataFrame([{"method":v["methods"][0], "graph":"yes" if v["graph_only"] else "no",
-                     **{lbl:v[mk] for mk,lbl in M7L}} for v in sing])
-display(sdf.style.hide(axis="index").format({l:"{:.3f}" for _,l in M7L})
-        .set_caption("Single methods on the final graph (ranked by Buggy-F1): "
-                     "CSTG (G) is strongest, non-graph M is near the weakest"))"""))
-
-cells.append(md("**Best combinations and the recommended formula** (feature-fusion "
-                "unless noted). Performance saturates by ~3–4 components; a compact "
-                "**graph-only R+T+G** matches the best while dropping non-graph M:"))
-
-cells.append(code(r"""def _find(fam, ms):
-    s=set(ms)
-    return next((v for v in FA[fam].values() if set(v["methods"])==s), None)
-picks=[("feat",["M","T","R","P"],"M+T+R+P (previous)"),
-       ("feat",["M","R","T","G"],"M+R+T+G (best overall)"),
-       ("stack",["R","T","P","G","RN","LP","KGE"],"R+T+P+G+RN+LP+KGE (best graph stack)"),
-       ("feat",["R","T","P","G"],"R+T+P+G"),
-       ("feat",["T","G"],"T+G"),
-       ("feat",["R","T","G"],"R+T+G  (RECOMMENDED)")]
-rows=[]
-for fam,ms,name in picks:
-    v=_find(fam,ms)
-    if v: rows.append({"fusion":name,"graph":"yes" if v["graph_only"] else "no",
-                       "#ch":len(v["methods"]),**{lbl:v[mk] for mk,lbl in M7L}})
-fdf=pd.DataFrame(rows)
-display(fdf.style.hide(axis="index").format({l:"{:.3f}" for _,l in M7L})
-        .set_caption("Candidate final Fusion formulas x 7 metrics"))
-display(Image(filename=str(FIG / "fig_fusion_pareto.png")))"""))
-
-cells.append(md(r"""### Recommended final Fusion: **R + T + G** (graph-only)
-
-- **R** relational priors + **T** AST structural change-tokens + **G** CSTG
-  semantic-text — three interpretable, purely graph-native channels.
-- vs the previous metrics-inclusive **M+T+R+P**, R+T+G improves the minority-class
-  metrics — **Recall 0.768 (+0.078), Buggy-F1 0.608 (+0.016), G-Mean 0.761 (+0.022),
-  AUC 0.834 (+0.014), Macro-F1 0.716 (+0.002)** — with tiny trades on Precision
-  (−0.015) and Accuracy (−0.010), i.e. a healthier recall-oriented operating point
-  for the minority buggy class.
-- It **drops the non-graph JIT metrics (M)** — which the singles show is the
-  *weakest* channel — and is **simpler** (3 vs 4 components).
-- **G (CSTG) is the single most valuable channel** (Buggy-F1 0.596 alone), and
-  larger fusions (up to 7 graph methods, Buggy-F1 0.618) add only marginal gains
-  over R+T+G — so R+T+G is the parsimonious, defensible choice for a Q1 paper.
-
-**Conclusion:** adopt **Fusion = R + T + G** as the deployed, purely graph-native
-model; report the full ablation (tables + Pareto plot above) as justification."""))
-
-cells.append(md(r"""### Full ablation — best fusions at every size
-
-The complete ablation has $2^{10}-1=1023$ score-stacking combinations. We show, for
-each fusion size $k=1,\dots,10$, the **best 8 $k$-method fusions** by Buggy-F1 (the
-$k{=}10$ table has the single all-methods combination), on all seven metrics —
-followed by three aggregate visualizations."""))
-
-cells.append(code(r"""display(Image(filename=str(FIG / "fig_ablation_bysize.png")))
-display(Image(filename=str(FIG / "fig_ablation_method_freq.png")))
-display(Image(filename=str(FIG / "fig_ablation_bestperk.png")))"""))
-
-cells.append(code(r"""# 10 per-size tables: top-8 by Buggy-F1, all seven metrics
-stack = list(FA["stack"].values())
-for k in range(1, 11):
-    subs = sorted([v for v in stack if len(v["methods"])==k], key=lambda v:-v["Buggy_F1"])[:8]
-    tdf = pd.DataFrame([{"fusion":"+".join(v["methods"]), "graph":"yes" if v["graph_only"] else "no",
-                         **{lbl:v[mk] for mk,lbl in M7L}} for v in subs])
-    sty = (tdf.style.hide(axis="index").format({l:"{:.3f}" for _,l in M7L})
-           .set_caption(f"k={k}: best {len(subs)} fusion(s) of {k} method(s) by Buggy-F1")
-           .set_table_styles([{"selector":"caption","props":[("font-weight","bold"),("font-size","110%")]}]))
-    display(sty)"""))
+# NOTE: the V3-era exhaustive fusion ablation (run_fusion_ablation.py ->
+# fusion_ablation_results.pkl, and its old "R+T+G" recommendation) is SUPERSEDED by
+# the V4 final fusion (run_final_fusion.py -> F=RN+PPR, deployed F+G=RN+PPR+CSTG,
+# rendered in final_experiments.ipynb). It is intentionally omitted from this
+# package's notebook to keep it to the final methodology only.
 
 cells.append(md(r"""## 8. Findings (subgraph RQ)
 

@@ -76,14 +76,22 @@ class CommitDataLoader:
             self._cached_repos[project_name] = Repo(repo_path)
         return self._cached_repos[project_name]
     
-    def fetch_all_commits_fast(self, project: str, limit: int = -1) -> Generator[Dict[str, Any], None, None]:
+    def fetch_all_commits_fast(self, project: str, limit: int = -1,
+                               only_commits=None) -> Generator[Dict[str, Any], None, None]:
         """
-        High-speed chronological commit streaming with complete inline code diff collection. 
+        High-speed chronological commit streaming with complete inline code diff collection.
         Processes the Git stream entirely in byte space to guarantee immunity to encoding failures.
+
+        only_commits : optional iterable of commit SHAs. When given, ONLY those
+            commits are streamed (via `git log --no-walk`, still chronological
+            via --reverse), instead of the repo's full history. Used by the
+            multi-repository ingestion so a large secondary repo (e.g. the hadoop
+            monorepo) contributes only its labelled commits, not all ~28k. See
+            docs/Critical_notes.tex.
         """
-        
+
         repo = self._get_repo(project)
-        
+
         # 1. Map branch alignments up front using local branch tracking heads only
         commit_branch_map = {}
         for branch in repo.branches:
@@ -96,14 +104,36 @@ class CommitDataLoader:
         # 1. Update your formatting string to include %P right after %H
         delimiter = b"||--NEXT_COMMIT--||"
         log_format = "||--NEXT_COMMIT--||%H|%P|%aN|%aE|%cN|%at|%ct|%B"
-        
+
         # Keep your command array exactly the same
         cmd = ["git", "-C", repo.working_dir, "log", "--reverse", f"--format={log_format}", "--numstat", "--summary", "-p"]
+        # Windows fix: some repos (e.g. hbase) contain files with a ':' in their
+        # name (HBASE-18070-ROOT_hbase:meta_Region_Replicas.pdf). ':' is illegal
+        # in Windows paths, so `git log -p` cannot materialize that blob's
+        # temp-file and dies with "fatal: unable to create temp-file: Invalid
+        # argument", aborting the whole stream. These are binary files that carry
+        # no signal for the KG (only .java text is parsed), so exclude any
+        # colon-named path from the diff. Trailing pathspec must come last.
+        colon_exclude = ["--", ".", ":(exclude,glob)**/*:*"]
+        stdin_bytes = None
+        if only_commits:
+            # Restrict to an explicit SHA set: --no-walk stops history traversal
+            # so we get exactly these commits (each still diffed vs its parent by
+            # the -p/--numstat machinery). --reverse orders them chronologically.
+            # The SHAs are passed via --stdin (one per line), NOT on the command
+            # line: a large allow-list (e.g. 796 SHAs ~ 32 KB) exceeds Windows'
+            # command-line length limit and raises WinError 206. See
+            # docs/Critical_notes.tex.
+            allow = [s for s in dict.fromkeys(only_commits)]   # de-dup, keep order
+            cmd += ["--no-walk", "--stdin"]
+            stdin_bytes = ("\n".join(allow) + "\n").encode("utf-8")
         if limit > 0:
             cmd.extend(["-n", str(limit)])
-            
+        cmd += colon_exclude   # trailing pathspec MUST be last (excludes ':'-named files)
+
         # NATIVE BYTES FIX: Directly stream stdout into bytes, completely bypassing encoding layers
-        process = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        process = subprocess.run(cmd, input=stdin_bytes,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         
         if process.returncode != 0:
             raise RuntimeError(f"Git command failed: {process.stderr.decode('utf-8', errors='replace')}")

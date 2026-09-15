@@ -301,7 +301,7 @@ def main():
         # run_final_fusion.eval_subset does (same protocol as the paper).
         yA = np.asarray(y)
         scoresF = {"RN": mpred["RN"], "PPR": mpred["PPR"]}
-        fm_F, ftr_F, _ = eval_subset(scoresF, ["RN", "PPR"], yA, W, Nc, init=INIT)
+        fm_F, ftr_F, _, _ = eval_subset(scoresF, ["RN", "PPR"], yA, W, Nc, init=INIT)
         out[v]["F_metrics"] = {k: float(fm_F[k]) for k in M7}
         out[v]["F_traj"] = {k: (val if isinstance(val, list) else list(val))
                             for k, val in ftr_F.items()}
@@ -309,7 +309,7 @@ def main():
               f"GM={fm_F['G_Mean']:.3f} AUC={fm_F['AUC']:.3f}")
         if g_score is not None:
             scores = {"RN": mpred["RN"], "PPR": mpred["PPR"], "G": g_score}
-            fm, ftr, _ = eval_subset(scores, ["RN", "PPR", "G"], yA, W, Nc, init=INIT)
+            fm, ftr, _, _ = eval_subset(scores, ["RN", "PPR", "G"], yA, W, Nc, init=INIT)
             out[v]["fusion_metrics"] = {k: float(fm[k]) for k in M7}
             out[v]["fusion_traj"] = {k: (val if isinstance(val, list) else list(val))
                                      for k, val in ftr.items()}

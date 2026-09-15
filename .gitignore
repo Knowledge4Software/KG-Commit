@@ -1,13 +1,57 @@
+# Python
 __pycache__/
+*.py[cod]
+*.egg-info/
 .venv/
-*.pyc
+venv/
 .env
+
+# Inputs read in place (see README §5) — never committed
 data/
-.cache/
 repos/
+dump_files/
+*.dump
+
+# Generated results, figures, tables, notebooks-with-output
 outputs/
-.claude/
-thesis/
-tools/
-Paper/
+logs/
+*.tgz
+*.log
+
+# Local machine configuration (use config/projects.template.yaml)
+config/projects.yaml
+config/projects.yaml.local-bak
+
+# Paper / thesis sources and drafts — not part of the code artifact
 docs/
+thesis/
+Paper/
+Final_draft/
+Final_final_draft/
+submitted/
+experiments/
+scripts/
+tests/
+tools/
+
+# Legacy research-repo baselines (superseded by baselines/run_*.py)
+baselines/old/
+baselines/results/
+baselines/*.csv
+baselines/*.ipynb
+
+# Research repo leftovers (superseded by this package)
+kgcommit_repro/
+kg_builder_cells_dump.txt
+neo4j_nb_dump.txt
+contribution_report.*
+*.txt.bak
+
+# Tooling
+.claude/
+.agents/
+lib/
+skills-lock.json
+.cache/
+.ipynb_checkpoints/
+.DS_Store

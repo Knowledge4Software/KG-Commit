@@ -9,7 +9,8 @@ Run:  python inference/make_final_fusion_tables.py
 import pickle
 from pathlib import Path
 
-OUT = Path(__file__).resolve().parent.parent / "outputs"
+import _kgc_paths  # noqa: F401  (adds package dirs to sys.path)
+from config.project_config import OUT  # per-project outputs/<project>/
 TAB = OUT / "tables" / "v4"; TAB.mkdir(parents=True, exist_ok=True)
 R = pickle.load(open(OUT / "final_fusion_results.pkl", "rb"))
 M7 = [("Precision", "Prec."), ("Recall", "Rec."), ("Macro_F1", "Macro-F1"),

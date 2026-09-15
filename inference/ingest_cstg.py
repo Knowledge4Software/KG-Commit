@@ -23,9 +23,9 @@ import numpy as np, pandas as pd
 from neo4j import GraphDatabase
 import cstg as C  # noqa: F401  (resolves the pickled CSTG class)
 
-ROOT = Path(__file__).resolve().parent.parent
-DIFFS = ROOT / "data/apachejit/apachejit_with_diffs_rebuilt.csv"
-NEO4J_URI = "bolt://localhost:7687"; NEO4J_AUTH = ("neo4j", "password1234")
+import _kgc_paths  # noqa: F401
+from config.project_config import NEO4J_URI, NEO4J_AUTH, DIFF_CSV as DIFFS, \
+    PROJECT_KEY as _PKEY, OUT as ROOT
 MENTIONS_TOPK = 20      # top TW-IDF terms per commit
 COOCCURS_TOPK = 8       # top NPMI neighbours per term
 COOCCURS_MIN = 0.35
@@ -33,9 +33,9 @@ GROUND = "--ground" in sys.argv
 
 
 def main():
-    cs, B = pickle.load(open(ROOT / "outputs" / "cstg_bundle.pkl", "rb"))
+    cs, B = pickle.load(open(ROOT / "cstg_bundle.pkl", "rb"))  # outputs/<project>/
     df = pd.read_csv(DIFFS, usecols=["commit_id", "project", "author_date"])
-    df = df[df["project"] == "apache/groovy"].sort_values("author_date").reset_index(drop=True)
+    df = df[df["project"] == _PKEY].sort_values("author_date").reset_index(drop=True)
     cids = df["commit_id"].astype(str).tolist()
     Xtw = B["X_twidf"].tocsr()
     inv = {j: t for t, j in cs.vocab.items()}
@@ -90,21 +90,31 @@ def main():
 
         if GROUND:
             # GROUNDS_IN: distinctive code terms -> alive identifier leaves (capped)
-            n = s.execute_write(lambda tx: tx.run("""
+            # Batched: one transaction per 200 terms. The single-transaction form
+            # accumulated millions of MERGEs and exceeded
+            # dbms.memory.transaction.total.max, killing the server.
+            s.run("""
                 MATCH (t:Term {kind:'code'})
                 CALL (t) {
-                  MATCH (a:ASTNode {is_leaf:true}) WHERE coalesce(a.alive,true) AND a.value=t.text
+                  MATCH (a:ASTNode {is_leaf:true}) WHERE a.alive=true AND a.value=t.text
                   WITH a LIMIT 200 RETURN collect(a) AS as
                 }
-                UNWIND as AS a MERGE (t)-[:GROUNDS_IN]->(a) RETURN count(*) AS n
-            """).single()["n"])
+                CALL (t, as) {
+                  UNWIND as AS a MERGE (t)-[:GROUNDS_IN]->(a)
+                } IN TRANSACTIONS OF 200 ROWS
+            """).consume()
+            n = s.run("MATCH ()-[r:GROUNDS_IN]->() RETURN count(r) AS n").single()["n"]
             print(f"GROUNDS_IN edges: {n}")
-            m = s.execute_write(lambda tx: tx.run("""
+            # Batched + de-duplicated. The original matched every (commit,file)
+            # edge, so a file touched by N commits was scanned N times.
+            s.run("""
                 MATCH (t:Term) WHERE size(t.text) >= 5
-                MATCH (:Commit)-[:MODIFIED|ADDED]->(f:File)
-                WHERE toLower(f.id) CONTAINS t.text
-                MERGE (t)-[:REFERS_TO]->(f) RETURN count(*) AS n
-            """).single()["n"])
+                CALL (t) {
+                  MATCH (f:File) WHERE toLower(f.id) CONTAINS t.text
+                  MERGE (t)-[:REFERS_TO]->(f)
+                } IN TRANSACTIONS OF 100 ROWS
+            """).consume()
+            m = s.run("MATCH ()-[r:REFERS_TO]->() RETURN count(r) AS n").single()["n"]
             print(f"REFERS_TO edges: {m}")
     d.close()
     print("done -> CSTG layer in Neo4j (growth is online; this is the accumulated state).")

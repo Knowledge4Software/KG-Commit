@@ -22,8 +22,9 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 import _common as C
+from config.project_config import FIG_DIR as _FIG_DIR, OUT as _OUT
 
-FIG = C.ROOT / "docs" / "figures" / "v4" / "insight"
+FIG = _FIG_DIR / "insight"               # outputs/<project>/figures/v4/insight/
 FIG.mkdir(parents=True, exist_ok=True)
 OKABE = ["#0072B2", "#E69F00", "#009E73", "#CC79A7", "#D55E00", "#56B4E9", "#F0E442", "#000000"]
 plt.rcParams.update({"figure.dpi": 120, "font.size": 10, "axes.grid": True,
@@ -39,7 +40,7 @@ def _save(fig, stem):
 
 def _streams():
     import pickle
-    return pickle.load(open(C.ROOT / "outputs" / "online_jit_streams_v5.pkl", "rb"))
+    return pickle.load(open(_OUT / "online_jit_streams_v5.pkl", "rb"))
 
 
 def _auc(y, s):
@@ -112,10 +113,11 @@ def fig_modality_complementarity(S):
 # ── 2. commit embedding projection ──────────────────────────────────────────
 
 def fig_commit_embedding(S):
-    emb_p = C.ROOT / "outputs" / "emb_distmult_8059.npy"
-    if not emb_p.exists():
-        return
-    E = np.load(emb_p); y = S["y"]
+    # optional standalone DistMult embedding, named by commit count -> glob it
+    embs = sorted(_OUT.glob("emb_distmult_*.npy"))
+    if not embs:
+        return                           # figure skipped if the embedding is absent
+    E = np.load(embs[0]); y = S["y"]
     from sklearn.decomposition import PCA
     Z = PCA(n_components=2, random_state=0).fit_transform(
         (E - E.mean(0)) / (E.std(0) + 1e-9))
@@ -184,12 +186,12 @@ def fig_defect_typing():
 
 def fig_calibration():
     import pickle
-    p = C.ROOT / "outputs" / "final_fusion_results.pkl"
+    p = _OUT / "final_fusion_results.pkl"
     if not p.exists():
         return
     d = pickle.load(open(p, "rb"))
     # F+G trajectory doesn't carry (y,p); use the online_jit ablation G+P proxy that does
-    ab = C.ROOT / "outputs" / "online_jit_ablation_v3.pkl"
+    ab = _OUT / "online_jit_ablation_v3.pkl"
     if not ab.exists():
         return
     A = pickle.load(open(ab, "rb"))
@@ -217,10 +219,13 @@ def fig_calibration():
 
 def fig_drift_signal(S):
     y = S["y"]
-    # rolling bug rate + rolling AUC of two modalities over stream position
-    win = 400
+    # rolling bug rate + rolling AUC of two modalities over stream position.
+    # Resolution matches the online-trajectory figures (window=150, stride=25):
+    # a higher sampling rate + lighter smoothing reveals real drift breaks that
+    # a wide window would flatten. See docs/Critical_notes.tex discussion.
+    win = 150
     n = len(y)
-    xs = np.arange(win, n, 100)
+    xs = np.arange(win, n, 25)
     def roll_auc(score):
         out = []
         for j in xs:
@@ -244,7 +249,7 @@ def fig_drift_signal(S):
 
 def fig_astgroup_risk():
     import csv
-    p = C.ROOT / "outputs" / "commit_features.csv"
+    p = _OUT / "commit_features.csv"
     if not p.exists():
         return
     rows = list(csv.DictReader(open(p)))

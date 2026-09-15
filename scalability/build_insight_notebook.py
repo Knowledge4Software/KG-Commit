@@ -19,8 +19,11 @@ from pathlib import Path
 import nbformat as nbf
 from nbformat.v4 import new_notebook, new_markdown_cell, new_code_cell
 
+import _kgc_paths  # noqa: F401  (adds package dirs to sys.path)
+from config.project_config import OUT as _OUT
 ROOT = Path(__file__).resolve().parent.parent
-NB = ROOT / "experiments" / "notebooks" / "additional_experiments_visualizations.ipynb"
+NB = _OUT / "notebooks" / "additional_experiments_visualizations.ipynb"   # per-project
+NB.parent.mkdir(parents=True, exist_ok=True)
 
 md, code = new_markdown_cell, new_code_cell
 cells = []
@@ -55,16 +58,18 @@ takeaway.
 
 cells.append(code(r"""import sys, json
 from pathlib import Path
-ROOT = Path.cwd()
-while not (ROOT / "scalability").exists() and ROOT != ROOT.parent:
-    ROOT = ROOT.parent
-sys.path.insert(0, str(ROOT / "scalability"))
+# find the kgcommit_repro package root (holds the scalability/ + config/ dirs)
+PKG = Path.cwd()
+while not (PKG / "scalability").exists() and PKG != PKG.parent:
+    PKG = PKG.parent
+sys.path.insert(0, str(PKG)); sys.path.insert(0, str(PKG / "scalability"))
+import _kgc_paths  # noqa: F401  (KGC_PROJECT env selects the project)
+from config.project_config import FIG_DIR, SCAL_OUT as SCAL_OUT
 import make_insight_figures as vis
 from IPython.display import Image, display
 import pandas as pd
-FIG = ROOT / "docs" / "figures" / "v4" / "insight"
-FIG_SCAL = ROOT / "docs" / "figures" / "v4" / "scalability"
-SCAL_OUT = ROOT / "outputs" / "scalability"
+FIG = FIG_DIR / "insight"                # outputs/<project>/figures/v4/insight/
+FIG_SCAL = FIG_DIR / "scalability"       # outputs/<project>/figures/v4/scalability/
 S = vis._streams()   # cached per-commit feature streams (no DB)
 print("streams:", {k: (getattr(v, 'shape', v) if k not in ('N','W') else v) for k,v in list(S.items())[:6]})
 def show(stem): display(Image(str(FIG / f"{stem}.png")))

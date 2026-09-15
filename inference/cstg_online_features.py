@@ -22,10 +22,13 @@ import numpy as np, scipy.sparse as sp, pandas as pd
 from sklearn.feature_extraction.text import HashingVectorizer
 import cstg as C
 
-ROOT = Path(__file__).resolve().parent.parent
-DIFFS = ROOT / "data/apachejit/apachejit_with_diffs_rebuilt.csv"
-HASH_DIM = 2 ** 18
-PROP_REFRESH = 400        # recompute NPMI + propagate every N commits (past-only)
+import _kgc_paths  # noqa: F401  (adds package dirs to sys.path)
+from config.project_config import OUT as _OUT, DIFF_CSV as DIFFS, PROJECT_KEY as _PKEY
+ROOT = _OUT                              # per-project outputs/<project>/ (cache root)
+# FINAL RUN: the CSTG refresh joins the single-M rule. NOTE this constant is in
+# COMMITS, not blocks -- it becomes BLOCK (=M), i.e. one refresh per block, matching
+# the fusion head, the embeddings and the baselines. It was 400 = 2M.
+from protocol import HASH_DIM, BLOCK as PROP_REFRESH  # noqa: F401
 PROP_ITERS = 4
 PROP_DAMP = 0.5
 NPMI_MIN = 0.3
@@ -35,12 +38,12 @@ TYPES = {"code": 0, "bug": 1, "action": 2, "error": 3, "nl": 4}
 def _parse_all():
     """Per-commit list of (source, type, term) with source in {m,a,r}, + centrality.
     Cached (TextRank is the slow part)."""
-    cache = ROOT / "outputs" / "cstg_polarity_docs.pkl"
+    cache = ROOT / "cstg_polarity_docs.pkl"
     if cache.exists():
         return pickle.load(open(cache, "rb"))
-    df = pd.read_csv(DIFFS, usecols=["commit_id", "project", "author_date"]).query("project=='apache/groovy'")
+    df = pd.read_csv(DIFFS, usecols=["commit_id", "project", "author_date"]).query(f"project=='{_PKEY}'")
     df = df.sort_values("author_date").reset_index(drop=True)
-    texts = pd.read_csv(DIFFS, usecols=["commit_id", "project", "diff_text"]).query("project=='apache/groovy'")
+    texts = pd.read_csv(DIFFS, usecols=["commit_id", "project", "diff_text"]).query(f"project=='{_PKEY}'")
     texts = texts.set_index("commit_id")["diff_text"].astype(str)
     out = {}
     for k, cid in enumerate(df["commit_id"].astype(str)):
@@ -135,7 +138,7 @@ def build_online_streams(cids, y):
 
 if __name__ == "__main__":
     # quick self-check on the diff CSV order
-    df = pd.read_csv(DIFFS, usecols=["commit_id", "project", "buggy", "author_date"]).query("project=='apache/groovy'")
+    df = pd.read_csv(DIFFS, usecols=["commit_id", "project", "buggy", "author_date"]).query(f"project=='{_PKEY}'")
     df = df.sort_values("author_date").reset_index(drop=True)
     cids = df["commit_id"].astype(str).tolist(); y = df["buggy"].astype(int).to_numpy()
     S = build_online_streams(cids, y)

@@ -20,8 +20,11 @@ from pathlib import Path
 import nbformat as nbf
 from nbformat.v4 import new_notebook, new_markdown_cell, new_code_cell
 
+import _kgc_paths  # noqa: F401  (adds package dirs to sys.path)
+from config.project_config import OUT as _OUT
 ROOT = Path(__file__).resolve().parent.parent
-NB = ROOT / "experiments" / "notebooks" / "scalability_v4.ipynb"
+NB = _OUT / "notebooks" / "scalability_v4.ipynb"   # per-project outputs/<project>/notebooks/
+NB.parent.mkdir(parents=True, exist_ok=True)
 
 md, code = new_markdown_cell, new_code_cell
 cells = []
@@ -53,11 +56,13 @@ import numpy as np
 import pandas as pd
 from IPython.display import Image, display, Markdown
 
-ROOT = Path.cwd()
-while not (ROOT / "outputs" / "scalability").exists() and ROOT != ROOT.parent:
-    ROOT = ROOT.parent
-SCAL = ROOT / "outputs" / "scalability"
-FIG  = ROOT / "docs" / "figures" / "v4" / "scalability"
+import os
+_root = Path.cwd()
+while not (_root / "outputs").exists() and _root != _root.parent:
+    _root = _root.parent
+_PROJ = os.environ.get("KGC_PROJECT", "groovy")            # per-project namespace
+SCAL = _root / "outputs" / _PROJ / "scalability"
+FIG  = _root / "outputs" / _PROJ / "figures" / "v4" / "scalability"
 
 def load(name):
     p = SCAL / name

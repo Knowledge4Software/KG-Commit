@@ -16,11 +16,13 @@ import json
 from pathlib import Path
 from neo4j import GraphDatabase
 
-OUT = Path(__file__).resolve().parent.parent / "outputs"
-NEO4J_URI = "bolt://localhost:7687"; NEO4J_AUTH = ("neo4j", "password1234")
+import _kgc_paths  # noqa: F401  (adds package dirs to sys.path)
+from config.project_config import OUT  # per-project outputs/<project>/
+from config.project_config import NEO4J_URI, NEO4J_AUTH
 
 LAYERS = [   # (variant id, pretty, label, type property)
     ("ast", "AST",        "ASTNode", "ast_type"),
+    ("ast_method", "AST (method)", "ASTMethodNode", "atype"),
     ("cfg", "CFG",        "CFGNode", "atype"),
     ("dfg", "DFG",        "DFGNode", "atype"),
     ("pdg", "PDG/CPG",    "PDGNode", "atype"),
@@ -37,7 +39,7 @@ def main():
         for vid, pretty, L, tp in LAYERS:
             row = {"pretty": pretty, "label": L}
             row["nodes"]  = one(f"MATCH (a:{L}) RETURN count(a)")
-            row["alive"]  = one(f"MATCH (a:{L}) WHERE coalesce(a.alive,true) RETURN count(a)")
+            row["alive"]  = one(f"MATCH (a:{L}) WHERE a.alive=true RETURN count(a)")
             row["delta_inserted"] = one(f"MATCH (a:{L}) WHERE a.is_delta RETURN count(a)")
             row["files"]  = one(f"MATCH (a:{L}) RETURN count(DISTINCT a.file)")
             for rel in DELTA:

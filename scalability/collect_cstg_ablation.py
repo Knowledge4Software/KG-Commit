@@ -32,8 +32,8 @@ import scipy.sparse as sp
 import pandas as pd
 
 import _common as C
+from config.project_config import DIFF_CSV as DIFFS, PROJECT_KEY as _PKEY
 
-DIFFS = C.ROOT / "data" / "apachejit" / "apachejit_with_diffs_rebuilt.csv"
 METRICS = ["la", "ld", "nf", "nd", "ns", "ent", "ndev", "age", "nuc", "aexp", "arexp", "asexp"]
 PUBLISHED_BASELINE = dict(ROC=0.813, PR=float("nan"), F1=0.321, Popt=float("nan"), ACC20=float("nan"))
 
@@ -65,15 +65,15 @@ def main():
     from sklearn.preprocessing import StandardScaler
 
     df = pd.read_csv(DIFFS)
-    df = df[df["project"] == "apache/groovy"].sort_values("author_date").reset_index(drop=True)
+    df = df[df["project"] == _PKEY].sort_values("author_date").reset_index(drop=True)
     y = df["buggy"].astype(int).to_numpy(); n = len(df)
     tr = np.arange(int(0.70 * n)); te = np.arange(int(0.85 * n), n)
     eff = (df["la"] + df["ld"]).to_numpy(float)
     Xm = df[METRICS].fillna(0).to_numpy(float)
     texts = df["diff_text"].astype(str).tolist()
-    print(f"groovy={n} train={len(tr)} test={len(te)} test bug-rate={y[te].mean():.3f}")
+    print(f"{_PKEY}: n={n} train={len(tr)} test={len(te)} test bug-rate={y[te].mean():.3f}")
 
-    cache = C.ROOT / "outputs" / "cstg_bundle.pkl"
+    cache = C.OUT.parent / "cstg_bundle.pkl"      # outputs/<project>/cstg_bundle.pkl
     print("loading cached CSTG bundle (fitted train-only, no re-parse) ...")
     cs, B = pickle.load(open(cache, "rb"))
     Xtw, prior, typed = B["X_twidf"], B["prior"], B["typed"]

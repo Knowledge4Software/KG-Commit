@@ -17,7 +17,8 @@ import numpy as np
 import matplotlib; matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-OUT = Path(__file__).resolve().parent.parent / "outputs"
+import _kgc_paths  # noqa: F401  (adds package dirs to sys.path)
+from config.project_config import OUT  # per-project outputs/<project>/
 FIG = OUT / "figures" / "v4"; FIG.mkdir(parents=True, exist_ok=True)
 
 ORDER = ["V1_none", "V2a_cfg", "V2b_dfg", "V2c_pdg", "V2d_seq", "V3_ast"]
@@ -126,14 +127,14 @@ def fig_metric_streams(res):
             ax.plot(t["idx"], t[mk], color=COLOR[v], lw=lw, ls=ls, label=SHORT[v], zorder=z)
         ax.set_title(title, fontsize=12, weight="bold")
         ax.grid(color="#ECECEC"); ax.set_axisbelow(True)
-        ax.set_xlabel("commit index", fontsize=9)
+        ax.set_xlabel("Commit index", fontsize=9)
         ax.tick_params(labelsize=8)
     ax_leg = axes[-1]; ax_leg.axis("off")
     h, l = axes[0].get_legend_handles_labels()
     ax_leg.legend(h, l, loc="center", ncol=2, fontsize=12, title="subgraph",
                   title_fontsize=12, frameon=False)
     fig.suptitle("Online evaluation trend per metric across subgraphs "
-                 "(deployed Fusion; rolling window = 800 commits)",
+                 "(deployed Fusion; rolling window = 150 commits, stride = 25)",
                  fontsize=14, weight="bold", y=1.01)
     fig.tight_layout()
     _save(fig, "fig_metric_streams")

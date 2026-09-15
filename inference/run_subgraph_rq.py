@@ -37,11 +37,17 @@ from online_infer import (build_incidence, online_priors, WARMUP_FRAC, BLOCK,
                           HASH_DIM)
 from online_jit import final_metrics, cum_metrics, online_decisions
 
-OUT = Path(__file__).resolve().parent.parent / "outputs"
-REFIT_EVERY = 3
-SVD_DIM = 64
-SVD_REFRESH = 5     # refit the KG (SVD/LSA) embedding every N blocks
-ROLL = 800          # rolling-window size for the trajectory plot
+import _kgc_paths  # noqa: F401  (adds package dirs to sys.path)
+from config.project_config import OUT  # per-project outputs/<project>/
+# FINAL RUN: single-M rule -- see inference/protocol.py.
+from protocol import REFIT_EVERY, SVD_DIM, ROLL
+SVD_REFRESH = REFIT_EVERY   # refresh once per BLOCK, like every other component
+# --- online-trajectory VISUALISATION resolution (see docs, chosen from the
+# stride/window comparison). These control ONLY how finely the 7-metric stream
+# curve is sampled/smoothed for the figures; they do NOT affect the online
+# protocol (BLOCK prediction granularity) or the headline metrics. A smaller
+# stride = more points (higher sampling rate); a smaller window = less smoothing.
+from protocol import TRAJ_STRIDE, TRAJ_WINDOW  # noqa: E402
 
 # the inference methods compared per subgraph. M (JIT metrics) and R (relational
 # priors) do NOT use the structural tokens, so they are subgraph-INDEPENDENT
@@ -61,6 +67,7 @@ VARIANTS = [
     ("V2b_dfg", "DFG (def-use) delta",    "DFGNode", "atype"),
     ("V2c_pdg", "PDG/CPG delta",          "PDGNode", "atype"),
     ("V2d_seq", "token/stmt-seq delta",   "SEQNode", "atype"),
+    ("V2e_ast_method", "AST (per-method) delta", "ASTMethodNode", "atype"),
     ("V3_ast",  "AST delta (incumbent)",  "ASTNode", "ast_type"),
 ]
 
@@ -73,7 +80,7 @@ def _lr(sparse=False):
 
 STREAM_METRICS = ["Precision", "Recall", "Macro_F1", "Buggy_F1", "G_Mean", "AUC", "ACC"]
 
-def metric_trajectory(y_ev, p_ev, warmup, roll=ROLL, step=BLOCK):
+def metric_trajectory(y_ev, p_ev, warmup, roll=TRAJ_WINDOW, step=TRAJ_STRIDE):
     """Rolling-window trend of the seven headline metrics over the online stream.
     x = commit index in the chronological stream (warmup + window end); threshold-
     based metrics use the leakage-free online-tuned decisions restricted to each
@@ -98,6 +105,22 @@ def metric_trajectory(y_ev, p_ev, warmup, roll=ROLL, step=BLOCK):
     return traj
 
 
+def rocpr_trajectory(y_ev, p_ev, warmup, roll=TRAJ_WINDOW, step=TRAJ_STRIDE):
+    """Rolling ROC-AUC / PR-AUC trajectory of the Fusion stream, at the chosen
+    visualisation resolution (stride/window). Computed post-hoc from the raw
+    per-commit predictions so it can be re-rendered at any resolution without
+    re-running the online evaluation."""
+    p_ev = np.clip(np.asarray(p_ev, float), 0, 1); y_ev = np.asarray(y_ev)
+    tr = {"idx": [], "ROC_AUC": [], "PR_AUC": []}
+    n = len(y_ev)
+    for j in range(step, n + 1, step):
+        lo = max(0, j - roll)
+        cm = cum_metrics(y_ev[lo:j], p_ev[lo:j])
+        tr["idx"].append(warmup + j)
+        tr["ROC_AUC"].append(cm["ROC_AUC"]); tr["PR_AUC"].append(cm["PR_AUC"])
+    return tr
+
+
 def run_variant(node_label, type_prop):
     commits, tokens, files, devs = load_kg(node_label, type_prop)
     cids = sorted(commits, key=lambda c: commits[c]["ts"])
@@ -114,7 +137,14 @@ def run_variant(node_label, type_prop):
     ppr_full = np.zeros(Nc)
 
     def fuse_dense(idx, sc):
-        return sc.transform(np.hstack([Xms[idx], Xp[idx], ppr_full[idx][:, None]]))
+        # Xms is ALREADY standardised; sc standardises again. Where a column has
+        # near-zero variance in the past window (e.g. ppr_full is all-zero in the
+        # first blocks) the second division explodes to >1e30, which liblinear
+        # rejects outright ("frozen fit"). Clip to a sane range and scrub any
+        # non-finite value so the fit stays well-posed.
+        Z = sc.transform(np.hstack([Xms[idx], Xp[idx], ppr_full[idx][:, None]]))
+        Z = np.nan_to_num(Z, nan=0.0, posinf=0.0, neginf=0.0)
+        return np.clip(Z, -1e6, 1e6)
     def fuse(idx, sc):
         return sp.hstack([sp.csr_matrix(fuse_dense(idx, sc)), Xh[idx]]).tocsr()
 
@@ -143,10 +173,6 @@ def run_variant(node_label, type_prop):
         pred["P"][idx] = ppr_full[idx]
         pred["E"][idx] = svd_clf.predict_proba(E[idx])[:, 1]
         pred["Fusion"][idx] = fus.predict_proba(fuse(idx, sc_f))[:, 1]
-        # rolling-window Fusion metrics over the last ROLL scored commits
-        lo = max(w, j - ROLL); sl = np.arange(lo, j)
-        cm = cum_metrics(y[sl], np.nan_to_num(pred["Fusion"][sl], nan=y[:i].mean()))
-        traj["idx"].append(j); traj["ROC_AUC"].append(cm["ROC_AUC"]); traj["PR_AUC"].append(cm["PR_AUC"])
         i = j; blk += 1
 
     ev = np.arange(w, Nc); yt = y[ev]
@@ -154,12 +180,22 @@ def run_variant(node_label, type_prop):
     n_tok_commits = sum(1 for c in cids if tokens.get(c))
     methods = {m: final_metrics(yt, np.nan_to_num(pred[m][ev], nan=yt.mean()))
                for m in METHOD_ORDER}
-    traj7 = metric_trajectory(yt, np.nan_to_num(pred["Fusion"][ev], nan=yt.mean()), w)
+    fusion_p = np.nan_to_num(pred["Fusion"][ev], nan=yt.mean())
+    # trajectories recomputed post-hoc from raw per-commit predictions, at the
+    # chosen visualisation resolution (TRAJ_STRIDE/TRAJ_WINDOW).
+    traj = rocpr_trajectory(yt, fusion_p, w)
+    traj7 = metric_trajectory(yt, fusion_p, w)
     return {
         "methods": methods,
         # backward-compatible aliases used by the tables/figures scripts
         "Fusion": methods["Fusion"], "T_only": methods["T"], "P_only": methods["P"],
         "traj": traj, "traj7": traj7,
+        # RAW per-commit signal: lets any future re-plot pick a new stride/window
+        # WITHOUT re-running the online evaluation (predictions are the costly part).
+        "raw_stream": {"idx": (w + np.arange(len(ev))).tolist(),
+                       "y": yt.astype(int).tolist(),
+                       "fusion_p": fusion_p.astype(float).tolist(),
+                       "traj_stride": TRAJ_STRIDE, "traj_window": TRAJ_WINDOW},
         "n_token_types": len(vocab), "n_commits_with_tokens": n_tok_commits,
         "warmup": w, "n_eval": len(ev), "stream_bug": float(yt.mean()),
     }
@@ -177,7 +213,8 @@ def main():
 
     ok = [v for v in VARIANTS if "error" not in results[v[0]]]
     short = {"V1_none": "Core", "V2a_cfg": "CFG", "V2b_dfg": "DFG",
-             "V2c_pdg": "PDG", "V2d_seq": "Seq", "V3_ast": "AST"}
+             "V2c_pdg": "PDG", "V2d_seq": "Seq",
+             "V2e_ast_method": "AST-m", "V3_ast": "AST"}
     # per-method x variant tables, one per metric
     for mk, mlabel in [("PR_AUC", "PR-AUC"), ("ROC_AUC", "ROC-AUC"),
                        ("F1_online", "F1-online")]:

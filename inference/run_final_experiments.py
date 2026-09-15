@@ -29,13 +29,25 @@ from advanced_infer import load_kg
 from online_infer import WARMUP_FRAC, BLOCK
 from online_jit import final_metrics, online_decisions
 
-OUT = Path(__file__).resolve().parent.parent / "outputs"
-NEO4J_URI = "bolt://localhost:7687"; NEO4J_AUTH = ("neo4j", "password1234")
-REFIT_EMB = 5; DW_DIM = 64; KGE_DIM = 32; ROLL = 800
+import _kgc_paths  # noqa: F401  (adds package dirs to sys.path)
+from config.project_config import OUT  # per-project outputs/<project>/
+from config.project_config import NEO4J_URI, NEO4J_AUTH
+# FINAL RUN: cadence and sizes come from inference/protocol.py (single-M rule).
+from protocol import (REFIT_EVERY as REFIT_EMB, DW_DIM, KGE_DIM, ROLL,
+                      WARMUP_FRAC as _P_WARMUP, BLOCK as _P_BLOCK, GAP as _P_GAP)
+# online-trajectory VISUALISATION resolution: two versions are persisted for
+# every stream -- the ACCURATE view (window=150, stride=25) and the SMOOTHED view
+# (window=800, stride=25). Both are visualisation-only; neither affects the
+# protocol or the end-of-stream metrics.
+from protocol import TRAJ_STRIDE, TRAJ_WINDOW, TRAJ_WINDOW_SMOOTH  # noqa: E402
 
-GRAPHS = ["core", "ast", "cfg", "dfg", "pdg", "final"]
-GRAPH_NAME = {"core": "Core", "ast": "Core+AST", "cfg": "Core+CFG",
-              "dfg": "Core+DFG", "pdg": "Core+PDG", "final": "Core+AST+CSTG"}
+GRAPHS = ["core", "ast", "cfg", "dfg", "pdg", "final"]   # ast_method dropped (unused)
+# final2 is an OPT-IN probe graph (Core+AST+CFG+CSTG) used only to test whether a
+# SECOND structural subgraph on top of AST helps; it is not in the default GRAPHS,
+# so normal runs are unaffected. Select it explicitly via --graphs ... final2.
+GRAPH_NAME = {"core": "Core", "ast": "Core+AST", "ast_method": "Core+AST-m", "cfg": "Core+CFG",
+              "dfg": "Core+DFG", "pdg": "Core+PDG", "final": "Core+AST+CSTG",
+              "final2": "Core+AST+CFG+CSTG"}
 METHODS = ["RN", "PPR", "LP", "DW", "KGE"]
 M7 = ["Precision", "Recall", "Macro_F1", "Buggy_F1", "G_Mean", "AUC", "ACC"]
 REL = {"T": 0, "F": 1, "D": 2, "S": 3}     # token, file, dev, cstg-term
@@ -60,7 +72,7 @@ def load_all():
     print("loading layers ...")
     commits, tok_ast, files, devs = load_kg("ASTNode", "ast_type")
     tok = {"ast": tok_ast}
-    for g, lbl in [("cfg", "CFGNode"), ("dfg", "DFGNode"), ("pdg", "PDGNode")]:
+    for g, lbl in [("ast_method", "ASTMethodNode"), ("cfg", "CFGNode"), ("dfg", "DFGNode"), ("pdg", "PDGNode")]:
         tok[g] = load_kg(lbl, "atype")[1]
     cids = sorted(commits, key=lambda c: commits[c]["ts"])
     y = np.array([commits[c]["buggy"] for c in cids])
@@ -77,11 +89,18 @@ def build_graph(g, cids, files, devs, tok, cstg):
         i = cidx[c]
         for f in files.get(c, ()):  raw.append((i, "F:" + f, 1.0, "F"))
         if c in devs:               raw.append((i, "D:" + devs[c], 1.0, "D"))
-        if g in ("ast", "cfg", "dfg", "pdg"):
+        if g in ("ast", "ast_method", "cfg", "dfg", "pdg"):
             for t, n in tok[g].get(c, ()):     raw.append((i, f"T{g}:" + t, float(n), "T"))
         elif g == "final":
             for t, n in tok["ast"].get(c, ()): raw.append((i, "Tast:" + t, float(n), "T"))
             for t, n in cstg.get(c, ()):       raw.append((i, "S:" + t, float(n), "S"))
+        elif g in ("final2", "final_astcfg", "final_astdfg", "final_astpdg"):
+            # probe graphs: Core + AST + <second subgraph> + CSTG
+            second = {"final2": "cfg", "final_astcfg": "cfg",
+                      "final_astdfg": "dfg", "final_astpdg": "pdg"}[g]
+            for t, n in tok["ast"].get(c, ()):    raw.append((i, "Tast:" + t, float(n), "T"))
+            for t, n in tok[second].get(c, ()):   raw.append((i, f"T{second}:" + t, float(n), "T"))
+            for t, n in cstg.get(c, ()):          raw.append((i, "S:" + t, float(n), "S"))
     df = defaultdict(int)
     for i, h, w, r in raw: df[h] += 1
     hub = {}; rows = []; cols = []; data = []; edges = []
@@ -131,13 +150,15 @@ def run_graph(g, cids, y, files, devs, tok, cstg, limit=0):
     for m in METHODS:
         p = np.clip(np.nan_to_num(pred[m][ev], nan=yt.mean()), 0, 1)
         out[m] = dict(metrics=final_metrics(yt, p),
-                      traj=metric_traj(yt, p, W))
+                      traj=metric_traj(yt, p, W),
+                      traj_smooth=metric_traj(yt, p, W, roll=TRAJ_WINDOW_SMOOTH))
     return out, pred      # pred: full-length per-commit scores per method
 
 
-def metric_traj(y_ev, p_ev, warmup, roll=ROLL, step=BLOCK):
-    """Rolling 7-metric online-evaluation trajectory (x = commit index)."""
-    yhat = online_decisions(p_ev, y_ev)
+def metric_traj(y_ev, p_ev, warmup, roll=TRAJ_WINDOW, step=TRAJ_STRIDE, gap=0):
+    """Rolling 7-metric online-evaluation trajectory (x = commit index).
+    `gap` (verification-latency G) lags the online threshold's revealed labels."""
+    yhat = online_decisions(p_ev, y_ev, gap=gap)
     tr = {"idx": []}; tr.update({m: [] for m in M7})
     n = len(y_ev)
     for j in range(step, n + 1, step):
@@ -155,25 +176,93 @@ def metric_traj(y_ev, p_ev, warmup, roll=ROLL, step=BLOCK):
     return tr
 
 
+def _lr_stack():
+    from sklearn.linear_model import LogisticRegression
+    return LogisticRegression(max_iter=2000, class_weight="balanced", solver="lbfgs")
+
+
+def fuse_methods(pred, y, W, N, refit=3):
+    """Prequential-LR stacking of the 5 graph methods on ONE graph, so each graph
+    (core, ast, ..., final) has a consistent 5-method Fusion comparable to the
+    final-graph fusion in run_final_fusion. Same stacking recipe as eval_subset:
+    fit LR on the expanding past window over the methods' per-commit scores."""
+    Z = np.column_stack([np.nan_to_num(pred[m], nan=float(y[:W].mean())) for m in METHODS])
+    p_all = np.full(N, np.nan); i = W; blk = 0
+    clf = _lr_stack().fit(Z[:W], y[:W]) if len(set(y[:W])) > 1 else None
+    while i < N:
+        j = min(N, i + BLOCK); idx = np.arange(i, j)
+        p_all[idx] = clf.predict_proba(Z[idx])[:, 1] if clf else float(y[:i].mean())
+        if blk % refit == 0 and len(set(y[:j])) > 1:
+            clf = _lr_stack().fit(Z[:j], y[:j])
+        i = j; blk += 1
+    ev = np.arange(W, N)
+    p = np.clip(np.nan_to_num(p_all[ev], nan=float(y[ev].mean())), 0, 1)
+    return dict(metrics=final_metrics(y[ev], p), traj=metric_traj(y[ev], p, W),
+                traj_smooth=metric_traj(y[ev], p, W, roll=TRAJ_WINDOW_SMOOTH),
+                p_ev=p.astype(np.float32),   # raw per-commit fused score (no Neo4j needed to re-smooth)
+                methods=list(METHODS))
+
+
 def main():
     ap = argparse.ArgumentParser(); ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--graphs", nargs="*", default=GRAPHS)
+    ap.add_argument("--outdir-suffix", type=str, default="")
     args = ap.parse_args()
     commits, cids, y, files, devs, tok, cstg = load_all()
+    y = np.asarray(y); N = len(cids); W = int(N * WARMUP_FRAC)
 
     results = {"meta": dict(graphs=GRAPHS, methods=METHODS, metrics=M7,
-                            warmup=int(len(cids) * WARMUP_FRAC), N=len(cids))}
+                            warmup=W, N=N)}
+    raw_scores = {}     # graph -> {method -> full-length per-commit score array}
     for g in args.graphs:
         print(f"\n=== graph: {GRAPH_NAME[g]} ===")
-        res, _ = run_graph(g, cids, y, files, devs, tok, cstg, args.limit)
+        res, pred = run_graph(g, cids, y, files, devs, tok, cstg, args.limit)
+        # per-graph 5-method fusion (consistent model family across all graphs)
+        if not args.limit:
+            res["Fusion"] = fuse_methods(pred, y, W, N)
         results[g] = res
+        raw_scores[g] = {m: np.asarray(pred[m], dtype=np.float32) for m in METHODS}
         for m in METHODS:
             r = res[m]["metrics"]
             print(f"  {m:<4} BF1={r['Buggy_F1']:.3f} MacroF1={r['Macro_F1']:.3f} "
                   f"GM={r['G_Mean']:.3f} AUC={r['AUC']:.3f}")
-    OUT.mkdir(exist_ok=True)
-    pickle.dump(results, open(OUT / "final_experiments_results.pkl", "wb"))
-    print(f"\nsaved -> {OUT/'final_experiments_results.pkl'}")
+        if "Fusion" in res:
+            r = res["Fusion"]["metrics"]
+            print(f"  {'FUSE':<4} BF1={r['Buggy_F1']:.3f} MacroF1={r['Macro_F1']:.3f} "
+                  f"GM={r['G_Mean']:.3f} AUC={r['AUC']:.3f}")
+    out_dir = OUT if not args.outdir_suffix else OUT / args.outdir_suffix
+    out_dir.mkdir(parents=True, exist_ok=True)
+    pickle.dump(results, open(out_dir / "final_experiments_results.pkl", "wb"))
+    print(f"\nsaved -> {out_dir/'final_experiments_results.pkl'}")
+
+    # ---- persist RAW per-commit method scores so any future re-smoothing /
+    #      re-selection / new-window rendering needs NO Neo4j rebuild ----
+    if not args.limit:
+        _persist_raw_scores(raw_scores, cids, y, W, N, out_dir)
+
+
+def _persist_raw_scores(raw_scores, cids, y, W, N, out_dir):
+    """Dump the full-length per-method per-graph score arrays (+ y, cids, warmup)
+    to a .pkl and a flat long .csv. Downstream re-smoothing at any window reads
+    these instead of recomputing from Neo4j."""
+    import csv
+    bundle = dict(graphs=list(raw_scores.keys()), methods=METHODS,
+                  cids=list(cids), y=np.asarray(y, dtype=np.int8),
+                  warmup=W, N=N, scores=raw_scores)
+    pickle.dump(bundle, open(out_dir / "raw_method_scores.pkl", "wb"))
+    csv_path = out_dir / "raw_method_scores.csv"
+    with open(csv_path, "w", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(["commit_index", "commit_id", "y", "graph", "method", "score"])
+        for g, mscores in raw_scores.items():
+            for m in METHODS:
+                arr = mscores[m]
+                for i in range(N):
+                    v = arr[i]
+                    w.writerow([i, cids[i], int(y[i]), g, m,
+                                "" if v != v else f"{float(v):.6f}"])  # v!=v -> NaN
+    print(f"saved raw per-method scores -> {out_dir/'raw_method_scores.pkl'} "
+          f"(+ {csv_path.name}; warmup W={W}, N={N})")
 
 
 if __name__ == "__main__":

@@ -39,9 +39,7 @@ from pathlib import Path
 import numpy as np
 
 import _common as C
-
-REPO = C.ROOT / "repos" / "apache" / "groovy"
-BASE_COMMIT = "408b29851d7bbe4d343340832297e4be7e0c5578"
+from config.project_config import REPO_PATH as REPO, BASE_COMMIT  # per-project
 
 
 def git_bytes(ref, path):

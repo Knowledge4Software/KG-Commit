@@ -19,7 +19,8 @@ Run:  python inference/make_metrics_tables.py
 import pickle, csv
 from pathlib import Path
 
-OUT = Path(__file__).resolve().parent.parent / "outputs"
+import _kgc_paths  # noqa: F401  (adds package dirs to sys.path)
+from config.project_config import OUT  # per-project outputs/<project>/
 TAB = OUT / "tables" / "v4"; TAB.mkdir(parents=True, exist_ok=True)
 
 ORDER = ["V1_none", "V2a_cfg", "V2b_dfg", "V2c_pdg", "V2d_seq", "V3_ast"]

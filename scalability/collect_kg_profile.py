@@ -53,7 +53,7 @@ def profile_struct_layer(s, lbl, tp):
     row = {"label": lbl}
     row["nodes"] = _one(s, f"MATCH (a:{lbl}) RETURN count(a)")
     row["alive"] = _one(
-        s, f"MATCH (a:{lbl}) WHERE coalesce(a.alive,true) RETURN count(a)")
+        s, f"MATCH (a:{lbl}) WHERE a.alive=true RETURN count(a)")
     row["removed"] = row["nodes"] - row["alive"]
     row["delta_inserted"] = _one(
         s, f"MATCH (a:{lbl}) WHERE a.is_delta RETURN count(a)")
@@ -137,7 +137,7 @@ def store_footprint(s):
 
 def main():
     ok, status = C.assert_db_complete()
-    print(f"DB complete (next_index==8059): {ok}  {status}")
+    print(f"DB complete (next_index==target): {ok}  {status}")
     d = C.driver()
     prof = {"_meta": {"scope": "final V4 methodology only; legacy ASTDiff/ASTEdit "
                               "excluded", "db_complete": ok, "checkpoints": status}}
@@ -165,10 +165,10 @@ def main():
     p = C.save_json(prof, "kg_profile.json")
     print(f"\nsaved -> {p}")
 
-    # sanity anchor against the existing cached layer stats
+    # sanity anchor against the cached layer stats (outputs/<project>/subgraph_layer_stats.json)
     try:
         import json
-        old = json.load(open(C.ROOT / "outputs" / "subgraph_layer_stats.json"))
+        old = json.load(open(C.OUT.parent / "subgraph_layer_stats.json"))
         a_old = old["ast"]["nodes"]; a_new = prof["ast"]["nodes"]
         print(f"anchor: AST nodes cached={a_old:,} vs live={a_new:,} "
               f"({'MATCH' if a_old == a_new else 'DIFFER'})")

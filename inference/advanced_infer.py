@@ -38,7 +38,8 @@ from sklearn.pipeline import make_pipeline
 from sklearn.metrics import (roc_auc_score, average_precision_score, f1_score,
                              precision_score, recall_score, matthews_corrcoef)
 
-NEO4J_URI="bolt://localhost:7687"; NEO4J_AUTH=("neo4j","password1234")
+import _kgc_paths  # noqa: F401
+from config.project_config import NEO4J_URI, NEO4J_AUTH
 METRICS=["la","ld","nf","nd","ns","ent","ndev","age","nuc","aexp","arexp","asexp"]
 TEST_FRAC=0.30
 ALPHA=0.85          # PPR damping

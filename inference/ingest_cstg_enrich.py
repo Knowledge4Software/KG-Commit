@@ -15,7 +15,8 @@ from neo4j import GraphDatabase
 import advanced_infer as ai
 import cstg_consistency as cc
 
-NEO4J_URI = "bolt://localhost:7687"; NEO4J_AUTH = ("neo4j", "password1234")
+import _kgc_paths  # noqa: F401
+from config.project_config import NEO4J_URI, NEO4J_AUTH
 
 
 def main():

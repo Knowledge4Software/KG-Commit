@@ -26,25 +26,28 @@ from pathlib import Path
 
 import numpy as np
 
-# ---- paths -----------------------------------------------------------------
-ROOT = Path(__file__).resolve().parent.parent
-INFERENCE = ROOT / "inference"
-OUT = ROOT / "outputs" / "scalability"
-FIG = ROOT / "docs" / "figures" / "v4" / "scalability"
-OUT_PARAM = ROOT / "outputs" / "param_experiments"
-FIG_PARAM = ROOT / "docs" / "figures" / "v4" / "param"
+# ---- paths (per-project, from config) --------------------------------------
+# _kgc_paths puts the package root + build/ + inference/ + scalability/ on
+# sys.path, so every `import kg_methods`, `import run_final_experiments`,
+# `import online_ast_diff`, etc. resolves exactly as in the original flat repo.
+# One edit here namespaces the WHOLE scalability suite (every other scalability
+# script imports _common), so all E1-E5 + CSTG-ablation outputs land under
+# outputs/<project>/scalability/ and figures under outputs/<project>/figures/.
+import _kgc_paths  # noqa: F401
+from config import project_config as _pc
+
+PKG_ROOT = _pc.PKG_ROOT                     # kgcommit_repro/  (package root)
+ROOT = _pc.PROJECT_ROOT                     # repo root (holds data/, repos/, outputs/)
+INFERENCE = PKG_ROOT / "inference"
+OUT = _pc.SCAL_OUT                          # outputs/<project>/scalability/
+FIG = _pc.FIG_DIR / "scalability"           # outputs/<project>/figures/v4/scalability/
+OUT_PARAM = _pc.OUT / "param_experiments"
+FIG_PARAM = _pc.FIG_DIR / "param"
 OUT.mkdir(parents=True, exist_ok=True)
+FIG.mkdir(parents=True, exist_ok=True)
 
-# make the existing final-methodology code importable:
-#  - inference/ holds the inference stack (kg_methods, run_final_experiments, ...)
-#  - the repo root holds the online build engines and differs (online_ast_diff,
-#    subgraph_builders, subgraph_diff, build_online_kg, ...)
-for _p in (INFERENCE, ROOT):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
-
-NEO4J_URI = "bolt://localhost:7687"
-NEO4J_AUTH = ("neo4j", "password1234")
+NEO4J_URI = _pc.NEO4J_URI
+NEO4J_AUTH = _pc.NEO4J_AUTH
 
 # The final graph family (columns of the V4 study). Token-seq intentionally absent.
 FINAL_GRAPHS = ["core", "ast", "cfg", "dfg", "pdg", "final"]
@@ -76,17 +79,27 @@ def read_session(d):
     return d.session(default_access_mode="READ")
 
 
+def n_labelled_commits():
+    """Number of labelled (in_jit) commits for the active project = the target
+    next_index a completed online build reaches. Read from the project label CSV."""
+    import csv as _csv
+    with open(_pc.CSV_PATH, newline="", encoding="utf-8") as f:
+        return sum(1 for _ in _csv.DictReader(f))
+
+
 def assert_db_complete():
-    """Confirm the online build finished (next_index==8059 in every checkpoint)
-    so the profiled graph is the final state, not a partial build."""
-    ck = ROOT / "outputs"
-    files = {"ast": ck / "online_kg_checkpoint.json"}
+    """Confirm the online build finished (each per-project checkpoint's next_index
+    reached the labelled-commit count) so the profiled graph is the final state,
+    not a partial build. Per-project: checkpoints live in outputs/<project>/."""
+    files = {"ast": _pc.CKPT_PATH}
     for k in ("cfg", "dfg", "pdg", "seq"):
-        files[k] = ck / f"online_kg_checkpoint_{k}.json"
+        files[k] = _pc.ckpt_path(k)
+    target = n_labelled_commits()
     status = {}
     for k, p in files.items():
         status[k] = json.load(open(p)).get("next_index") if p.exists() else None
-    ok = all(v == 8059 for v in status.values())
+    ok = all(v == target for v in status.values())
+    status["_target"] = target
     return ok, status
 
 

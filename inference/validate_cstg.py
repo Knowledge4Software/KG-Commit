@@ -20,7 +20,8 @@ from sklearn.preprocessing import StandardScaler
 import effort_metrics as em
 import cstg as C
 
-DIFFS = Path(__file__).resolve().parent.parent / "data/apachejit/apachejit_with_diffs_rebuilt.csv"
+import _kgc_paths  # noqa: F401  (adds package dirs to sys.path)
+from config.project_config import DIFF_CSV as DIFFS, PROJECT_KEY as _PKEY, OUT as _OUT
 METRICS = ["la", "ld", "nf", "nd", "ns", "ent", "ndev", "age", "nuc", "aexp", "arexp", "asexp"]
 
 
@@ -38,16 +39,16 @@ def evalp(y, p, eff):
 
 def main():
     df = pd.read_csv(DIFFS)
-    df = df[df["project"] == "apache/groovy"].sort_values("author_date").reset_index(drop=True)
+    df = df[df["project"] == _PKEY].sort_values("author_date").reset_index(drop=True)
     y = df["buggy"].astype(int).to_numpy(); n = len(df)
     tr = np.arange(int(0.70 * n)); te = np.arange(int(0.85 * n), n)
     eff = (df["la"] + df["ld"]).to_numpy(float)
     Xm = df[METRICS].fillna(0).to_numpy(float)
     texts = df["diff_text"].astype(str).tolist()
-    print(f"groovy={n}  train={len(tr)}  test={len(te)}  test bug-rate={y[te].mean():.3f}")
+    print(f"{_PKEY}: n={n}  train={len(tr)}  test={len(te)}  test bug-rate={y[te].mean():.3f}")
 
     import pickle
-    cache = Path(__file__).resolve().parent.parent / "outputs" / "cstg_bundle.pkl"
+    cache = _OUT / "cstg_bundle.pkl"      # outputs/<project>/cstg_bundle.pkl
     if cache.exists():
         print("loading cached CSTG bundle...")
         cs, B = pickle.load(open(cache, "rb"))

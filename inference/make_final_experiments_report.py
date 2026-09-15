@@ -19,22 +19,37 @@ import numpy as np
 import matplotlib; matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-OUT = Path(__file__).resolve().parent.parent / "outputs"
-TAB = OUT / "tables" / "v4"; FIG = OUT / "figures" / "v4" / "final"
+import _kgc_paths  # noqa: F401  (adds package dirs to sys.path)
+from config.project_config import OUT  # per-project outputs/<project>/
+import argparse
+
+ap = argparse.ArgumentParser()
+ap.add_argument("--outdir-suffix", type=str, default="")
+args = ap.parse_args()
+
+out_dir = OUT if not args.outdir_suffix else OUT / args.outdir_suffix
+TAB = out_dir / "tables" / "v4"; FIG = out_dir / "figures" / "v4" / "final"
 TAB.mkdir(parents=True, exist_ok=True); FIG.mkdir(parents=True, exist_ok=True)
 
-R = pickle.load(open(OUT / "final_experiments_results.pkl", "rb"))
+R = pickle.load(open(out_dir / "final_experiments_results.pkl", "rb"))
+# ast_method (the per-method AST variant) was DROPPED from the final methodology, so
+# the main tree stays on the final 6-graph family even when a project's pickle still
+# carries ast_method data. The dedicated v4_ast_method/ side branch is the one place
+# it belongs, so keep it there (that branch exists precisely to study it).
+_SIDE_BRANCH = "ast_method" in (args.outdir_suffix or "")
 GRAPHS = ["core", "ast", "cfg", "dfg", "pdg", "final"]
-GNAME = {"core": "Core", "ast": "Core+AST", "cfg": "Core+CFG", "dfg": "Core+DFG",
+if _SIDE_BRANCH and "ast_method" in R:
+    GRAPHS.insert(2, "ast_method")
+GNAME = {"core": "Core", "ast": "Core+AST", "ast_method": "Core+AST-m", "cfg": "Core+CFG", "dfg": "Core+DFG",
          "pdg": "Core+PDG", "final": "Core+AST+CSTG"}
-GSHORT = {"core": "Core", "ast": "+AST", "cfg": "+CFG", "dfg": "+DFG",
+GSHORT = {"core": "Core", "ast": "+AST", "ast_method": "+AST-m", "cfg": "+CFG", "dfg": "+DFG",
           "pdg": "+PDG", "final": "Final"}
 METHODS = ["RN", "PPR", "LP", "DW", "KGE"]
 MNAME = {"RN": "Relational neighbour", "PPR": "Personalized PageRank",
          "LP": "Label propagation", "DW": "DeepWalk embedding", "KGE": "KG embedding (DistMult)"}
 M7 = [("Precision", "Prec."), ("Recall", "Rec."), ("Macro_F1", "Macro-F1"),
       ("Buggy_F1", "Buggy-F1"), ("G_Mean", "G-Mean"), ("AUC", "AUC"), ("ACC", "Acc.")]
-GCOL = {"core": "#999999", "ast": "#56B4E9", "cfg": "#E69F00", "dfg": "#009E73",
+GCOL = {"core": "#999999", "ast": "#56B4E9", "ast_method": "#CC79A7", "cfg": "#E69F00", "dfg": "#009E73",
         "pdg": "#0072B2", "final": "#D55E00"}
 MCOL = {"RN": "#56B4E9", "PPR": "#D55E00", "LP": "#009E73", "DW": "#0072B2", "KGE": "#CC79A7"}
 plt.rcParams.update({"savefig.dpi": 150, "font.size": 10, "font.family": "DejaVu Sans"})
@@ -80,7 +95,7 @@ def _panel(ax, series, mk, title):
         ax.plot(xs, ys, color=color, lw=lw, ls=ls, label=lab)
     ax.set_title(title, fontsize=11, weight="bold")
     ax.grid(color="#EEE"); ax.set_axisbelow(True)
-    ax.set_xlabel("commit index", fontsize=8); ax.tick_params(labelsize=8)
+    ax.set_xlabel("Commit index", fontsize=8); ax.tick_params(labelsize=8)
 
 
 def by_method_figs():

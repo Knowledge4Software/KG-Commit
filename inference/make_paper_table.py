@@ -9,7 +9,8 @@ Run:  python inference/make_paper_table.py   ->  outputs/tables/v4/tab_paper_gro
 import pickle
 from pathlib import Path
 
-OUT = Path(__file__).resolve().parent.parent / "outputs"
+import _kgc_paths  # noqa: F401  (adds package dirs to sys.path)
+from config.project_config import OUT  # per-project outputs/<project>/
 TAB = OUT / "tables" / "v4"; TAB.mkdir(parents=True, exist_ok=True)
 R = pickle.load(open(OUT / "final_experiments_results.pkl", "rb"))
 

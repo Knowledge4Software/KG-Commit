@@ -11,8 +11,12 @@ from nbformat.v4 import new_notebook, new_markdown_cell, new_code_cell
 from pathlib import Path
 import subprocess, sys
 
+import _kgc_paths  # noqa: F401  (adds package dirs to sys.path)
+from config.project_config import OUT as _OUT, PROJECT as _PROJECT
 ROOT = Path(__file__).resolve().parent.parent
-NB = ROOT / "experiments" / "notebooks" / "final_experiments.ipynb"
+# per-project executed notebook: outputs/<project>/notebooks/
+NB = _OUT / "notebooks" / "final_experiments.ipynb"
+NB.parent.mkdir(parents=True, exist_ok=True)
 md, code = new_markdown_cell, new_code_cell
 cells = []
 
@@ -39,15 +43,16 @@ reading a **column** answers *which method wins on this graph* (the *which-metho
 RQ). The final graph adds the CSTG term-hubs so the walks/embeddings also traverse
 the semantic signal."""))
 
-cells.append(code(r"""import pickle
+cells.append(code(r"""import os, pickle
 from pathlib import Path
 import numpy as np, pandas as pd
 from IPython.display import Image, display
 
-OUT = Path.cwd()
-while not (OUT / "outputs").exists() and OUT != OUT.parent:
-    OUT = OUT.parent
-OUT = OUT / "outputs"
+# per-project outputs: <repo>/outputs/<KGC_PROJECT>/  (namespaced; see project_config.py)
+_root = Path.cwd()
+while not (_root / "outputs").exists() and _root != _root.parent:
+    _root = _root.parent
+OUT = _root / "outputs" / os.environ.get("KGC_PROJECT", "groovy")
 R = pickle.load(open(OUT / "final_experiments_results.pkl", "rb"))
 FIG = OUT / "figures" / "v4" / "final"
 
@@ -72,7 +77,7 @@ cells.append(code(r"""for mk, lbl in M7:
 
 cells.append(md(r"""## 2. Online-evaluation stream plots
 
-The prequential value of each metric over the commit stream (rolling window = 800).
+The prequential value of each metric over the commit stream (rolling window = 150 commits, stride = 25).
 Two complementary views."""))
 
 cells.append(md(r"""### 2a. By method — trends are graphs (35 stream plots)

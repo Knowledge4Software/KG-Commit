@@ -26,17 +26,20 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.ticker import FuncFormatter
 
-OUT = Path(__file__).resolve().parent.parent / "outputs"
+import _kgc_paths  # noqa: F401  (adds package dirs to sys.path)
+from config.project_config import OUT  # per-project outputs/<project>/
 FIG = OUT / "figures" / "v4"; FIG.mkdir(parents=True, exist_ok=True)
 
 # fixed variant order + Okabe-Ito CVD-safe colours (AST = bold vermillion accent)
+# V2e_ast_method was DROPPED from the final methodology -- excluded here even when a
+# project's subgraph_rq_results.pkl still carries it.
 ORDER  = ["V1_none", "V2a_cfg", "V2b_dfg", "V2c_pdg", "V2d_seq", "V3_ast"]
 SHORT  = {"V1_none": "Core\n(no subgraph)", "V2a_cfg": "CFG", "V2b_dfg": "DFG",
-          "V2c_pdg": "PDG/CPG", "V2d_seq": "Token-seq", "V3_ast": "AST"}
+          "V2c_pdg": "PDG/CPG", "V2d_seq": "Token-seq", "V2e_ast_method": "AST-m", "V3_ast": "AST"}
 COLOR  = {"V1_none": "#999999", "V2a_cfg": "#56B4E9", "V2b_dfg": "#009E73",
-          "V2c_pdg": "#0072B2", "V2d_seq": "#E69F00", "V3_ast": "#D55E00"}
+          "V2c_pdg": "#0072B2", "V2d_seq": "#E69F00", "V2e_ast_method": "#CC79A7", "V3_ast": "#D55E00"}
 STATKEY = {"V1_none": "_core", "V2a_cfg": "cfg", "V2b_dfg": "dfg",
-           "V2c_pdg": "pdg", "V2d_seq": "seq", "V3_ast": "ast"}
+           "V2c_pdg": "pdg", "V2d_seq": "seq", "V2e_ast_method": "ast_method", "V3_ast": "ast"}
 
 plt.rcParams.update({
     "figure.dpi": 120, "savefig.dpi": 200, "font.size": 11,
@@ -77,7 +80,7 @@ def fig_fusion_metrics(res):
         bars[-1].set_edgecolor("#222222"); bars[-1].set_linewidth(1.6)
         _barlabels(ax, bars)
         compact = {"V1_none": "Core", "V2a_cfg": "CFG", "V2b_dfg": "DFG",
-                   "V2c_pdg": "PDG", "V2d_seq": "Seq", "V3_ast": "AST"}
+                   "V2c_pdg": "PDG", "V2d_seq": "Seq", "V2e_ast_method": "AST-m", "V3_ast": "AST"}
         ax.set_xticks(range(len(ORDER)))
         ax.set_xticklabels([compact[v] for v in ORDER], fontsize=9.5, rotation=0)
         lo = min(vals); ax.set_ylim(max(0, lo - 0.06), max(vals) + 0.03)
@@ -144,7 +147,7 @@ def fig_trajectory(res):
         ax.plot(t["idx"], t["PR_AUC"], color=COLOR[v], lw=lw, ls=ls,
                 label=SHORT[v].replace("\n", " "), zorder=3 if v == "V3_ast" else 2)
     ax.set_xlabel("commit index in chronological stream")
-    ax.set_ylabel("rolling PR-AUC (window = 800 commits)")
+    ax.set_ylabel("rolling PR-AUC (window = 150 commits, stride = 25)")
     ax.set_title("Consistency over the stream: AST leads throughout",
                  fontsize=12, weight="bold")
     ax.legend(ncol=3, fontsize=9, frameon=False, loc="lower right")
@@ -152,9 +155,11 @@ def fig_trajectory(res):
 
 
 def fig_layer_sizes(stats):
-    layers = ["ast", "cfg", "dfg", "pdg", "seq"]
+    # ast_method dropped from the final methodology; also skip any layer absent
+    # from this project's stats.
     vmap = {"ast": "V3_ast", "cfg": "V2a_cfg", "dfg": "V2b_dfg",
             "pdg": "V2c_pdg", "seq": "V2d_seq"}
+    layers = [l for l in ["ast", "cfg", "dfg", "pdg", "seq"] if l in stats]
     fig, axes = plt.subplots(1, 2, figsize=(11, 4.2))
     for ax, key, title in [(axes[0], "nodes", "nodes per layer"),
                            (axes[1], "delta_total", "delta-edges per layer")]:
@@ -180,7 +185,7 @@ METHOD_LABEL = {"M": "JIT metrics", "R": "Priors (wvRN)", "T": "Struct TF-IDF",
                 "P": "PPR", "E": "KG embed (SVD)", "Fusion": "Fusion"}
 STRUCT = ["T", "P", "E", "Fusion"]
 COMPACT = {"V1_none": "Core", "V2a_cfg": "CFG", "V2b_dfg": "DFG",
-           "V2c_pdg": "PDG", "V2d_seq": "Seq", "V3_ast": "AST"}
+           "V2c_pdg": "PDG", "V2d_seq": "Seq", "V2e_ast_method": "AST-m", "V3_ast": "AST"}
 
 
 def fig_permethod_heatmap(res, metric="PR_AUC", mlabel="PR-AUC"):
